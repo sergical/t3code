@@ -35,6 +35,9 @@ const rpcSpanAttributes = (
   ...traceAttributes,
 });
 
+// Each request is its own trace root. The WebSocket connection span above
+// it lives as long as the socket, and exporters that ship a tree only when
+// its root ends would never send a request that stays parented on it.
 const withRpcEffectTracing = <A, E, R>(
   method: string,
   effect: Effect.Effect<A, E, R>,
@@ -43,6 +46,7 @@ const withRpcEffectTracing = <A, E, R>(
   shouldTraceRpc(method)
     ? effect.pipe(
         Effect.withSpan(`${RPC_SPAN_PREFIX}.${method}`, {
+          root: true,
           attributes: rpcSpanAttributes(method, traceAttributes),
         }),
       )
@@ -56,6 +60,7 @@ const withRpcStreamTracing = <A, E, R>(
   shouldTraceRpc(method)
     ? stream.pipe(
         Stream.withSpan(`${RPC_SPAN_PREFIX}.${method}`, {
+          root: true,
           attributes: rpcSpanAttributes(method, traceAttributes),
         }),
       )

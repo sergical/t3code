@@ -314,6 +314,8 @@ interface ClaudeSessionContext {
   lastKnownTotalProcessedTokens: number | undefined;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
+  /** Id of the newest parent message whose frames arrived over stream_event; snapshots of that message must not re-report its usage. */
+  lastStreamedMessageId: string | undefined;
   stopped: boolean;
 }
 
@@ -731,6 +733,14 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
       ? { turnCount: turnCountValue }
       : {}),
   };
+}
+
+function isToolUseBlockType<T extends { readonly type?: unknown }>(
+  block: T,
+): block is T & { readonly type: "tool_use" | "server_tool_use" | "mcp_tool_use" } {
+  return (
+    block.type === "tool_use" || block.type === "server_tool_use" || block.type === "mcp_tool_use"
+  );
 }
 
 function classifyToolItemType(toolName: string): CanonicalItemType {
@@ -2006,6 +2016,80 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
+  const startToolItem = Effect.fn("startToolItem")(function* (
+    context: ClaudeSessionContext,
+    options: {
+      readonly index: number;
+      readonly block: { readonly id: string; readonly name: string; readonly input: unknown };
+      readonly parentToolUseId: string | undefined;
+      readonly rawMethod: string;
+      readonly rawPayload: unknown;
+    },
+  ) {
+    const { index, block, parentToolUseId, rawMethod, rawPayload } = options;
+    const toolName = block.name;
+    const itemType = classifyToolItemType(toolName);
+    const toolInput =
+      typeof block.input === "object" && block.input !== null
+        ? (block.input as Record<string, unknown>)
+        : {};
+    const itemId = block.id;
+    const detail = summarizeToolRequest(toolName, toolInput);
+    const inputFingerprint =
+      Object.keys(toolInput).length > 0 ? toolInputFingerprint(toolInput) : undefined;
+
+    // Attribute tools that ran inside a subagent to their owning agent so
+    // clients can re-home them out of the main timeline (quiet-timeline
+    // guarantee): the SDK forwards subagent tool_use blocks tagged with the
+    // spawning Task tool's id as parent_tool_use_id.
+    const owningAgentId = agentIdForParentToolUse(context.taskAgents, parentToolUseId);
+
+    const tool: ToolInFlight = {
+      itemId,
+      itemType,
+      toolName,
+      title: titleForTool(itemType),
+      detail,
+      input: toolInput,
+      partialInputJson: "",
+      ...(inputFingerprint ? { lastEmittedInputFingerprint: inputFingerprint } : {}),
+      ...(owningAgentId ? { agentId: owningAgentId } : {}),
+      ...(parentToolUseId ? { parentToolUseId } : {}),
+    };
+    context.inFlightTools.set(index, tool);
+
+    const stamp = yield* makeEventStamp();
+    yield* offerRuntimeEvent({
+      type: "item.started",
+      eventId: stamp.eventId,
+      provider: PROVIDER,
+      createdAt: stamp.createdAt,
+      threadId: context.session.threadId,
+      ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
+      itemId: asRuntimeItemId(tool.itemId),
+      payload: {
+        itemType: tool.itemType,
+        status: "inProgress",
+        title: tool.title,
+        ...(tool.detail ? { detail: tool.detail } : {}),
+        ...(tool.agentId ? { agentId: tool.agentId } : {}),
+        ...(tool.parentToolUseId ? { parentToolUseId: tool.parentToolUseId } : {}),
+        data: {
+          toolName: tool.toolName,
+          input: toolInput,
+        },
+      },
+      providerRefs: nativeProviderRefs(context, {
+        providerItemId: tool.itemId,
+      }),
+      raw: {
+        source: "claude.sdk.message",
+        method: rawMethod,
+        payload: rawPayload,
+      },
+    });
+  });
+
   const ensureThreadId = Effect.fn("ensureThreadId")(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
@@ -2465,6 +2549,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       }
     }
 
+    if (event.type === "message_start") {
+      if (message.parent_tool_use_id === null || message.parent_tool_use_id === undefined) {
+        context.lastStreamedMessageId = event.message.id;
+      }
+      return;
+    }
+
     if (event.type === "message_delta") {
       if (message.parent_tool_use_id !== null && message.parent_tool_use_id !== undefined) {
         return;
@@ -2644,76 +2735,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         return;
       }
-      if (
-        block.type !== "tool_use" &&
-        block.type !== "server_tool_use" &&
-        block.type !== "mcp_tool_use"
-      ) {
+      if (!isToolUseBlockType(block)) {
         return;
       }
 
-      const toolName = block.name;
-      const itemType = classifyToolItemType(toolName);
-      const toolInput =
-        typeof block.input === "object" && block.input !== null
-          ? (block.input as Record<string, unknown>)
-          : {};
-      const itemId = block.id;
-      const detail = summarizeToolRequest(toolName, toolInput);
-      const inputFingerprint =
-        Object.keys(toolInput).length > 0 ? toolInputFingerprint(toolInput) : undefined;
-
-      // Attribute tools that ran inside a subagent to their owning agent so
-      // clients can re-home them out of the main timeline (quiet-timeline
-      // guarantee): the SDK forwards subagent tool_use blocks tagged with the
-      // spawning Task tool's id as parent_tool_use_id.
       const parentToolUseId =
         (message as { parent_tool_use_id?: string | null }).parent_tool_use_id ?? undefined;
-      const owningAgentId = agentIdForParentToolUse(context.taskAgents, parentToolUseId);
-
-      const tool: ToolInFlight = {
-        itemId,
-        itemType,
-        toolName,
-        title: titleForTool(itemType),
-        detail,
-        input: toolInput,
-        partialInputJson: "",
-        ...(inputFingerprint ? { lastEmittedInputFingerprint: inputFingerprint } : {}),
-        ...(owningAgentId ? { agentId: owningAgentId } : {}),
-        ...(parentToolUseId ? { parentToolUseId } : {}),
-      };
-      context.inFlightTools.set(index, tool);
-
-      const stamp = yield* makeEventStamp();
-      yield* offerRuntimeEvent({
-        type: "item.started",
-        eventId: stamp.eventId,
-        provider: PROVIDER,
-        createdAt: stamp.createdAt,
-        threadId: context.session.threadId,
-        ...(context.turnState ? { turnId: asCanonicalTurnId(context.turnState.turnId) } : {}),
-        itemId: asRuntimeItemId(tool.itemId),
-        payload: {
-          itemType: tool.itemType,
-          status: "inProgress",
-          title: tool.title,
-          ...(tool.detail ? { detail: tool.detail } : {}),
-          ...(tool.agentId ? { agentId: tool.agentId } : {}),
-          ...(tool.parentToolUseId ? { parentToolUseId: tool.parentToolUseId } : {}),
-          data: {
-            toolName: tool.toolName,
-            input: toolInput,
-          },
-        },
-        providerRefs: nativeProviderRefs(context, {
-          providerItemId: tool.itemId,
-        }),
-        raw: {
-          source: "claude.sdk.message",
-          method: "claude/stream_event/content_block_start",
-          payload: message,
-        },
+      yield* startToolItem(context, {
+        index,
+        block,
+        parentToolUseId,
+        rawMethod: "claude/stream_event/content_block_start",
+        rawPayload: message,
       });
       return;
     }
@@ -2959,6 +2992,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         updatedAt: startedAt,
       };
       const turnStartedStamp = yield* makeEventStamp();
+      const syntheticModel = trimmedString(message.message.model);
       yield* offerRuntimeEvent({
         type: "turn.started",
         eventId: turnStartedStamp.eventId,
@@ -2966,7 +3000,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         createdAt: turnStartedStamp.createdAt,
         threadId: context.session.threadId,
         turnId,
-        payload: {},
+        payload: syntheticModel ? { model: syntheticModel } : {},
         providerRefs: {
           ...nativeProviderRefs(context),
           providerTurnId: turnId,
@@ -3011,6 +3045,53 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (context.turnState) {
       context.turnState.items.push(message.message);
       yield* backfillAssistantTextBlocksFromSnapshot(context, message);
+
+      // The CLI sometimes delivers a whole response as one snapshot with no
+      // stream_event frames (seen on the parent's first response while a
+      // foreground Agent ran). Tool blocks and usage then only exist here;
+      // streamed messages already reported both.
+      if (Array.isArray(content)) {
+        for (const [snapshotIndex, block] of content.entries()) {
+          if (!block || typeof block !== "object") {
+            continue;
+          }
+          const toolUseBlock = block as { type?: unknown; id?: unknown; name?: unknown };
+          if (
+            !isToolUseBlockType(toolUseBlock) ||
+            typeof toolUseBlock.id !== "string" ||
+            typeof toolUseBlock.name !== "string"
+          ) {
+            continue;
+          }
+          const alreadyStarted = Array.from(context.inFlightTools.values()).some(
+            (tool) => tool.itemId === toolUseBlock.id,
+          );
+          if (alreadyStarted) {
+            continue;
+          }
+          yield* startToolItem(context, {
+            index: snapshotIndex,
+            block: block as { id: string; name: string; input: unknown },
+            parentToolUseId: message.parent_tool_use_id ?? undefined,
+            rawMethod: "claude/assistant",
+            rawPayload: message,
+          });
+        }
+      }
+
+      if (message.message.id !== context.lastStreamedMessageId) {
+        const snapshot = normalizeClaudeActiveTokenUsage(
+          message.message.usage,
+          context.lastKnownContextWindow,
+          context.lastKnownTotalProcessedTokens,
+        );
+        if (snapshot) {
+          yield* emitThreadTokenUsage(context, snapshot, {
+            rawMethod: "claude/assistant",
+            rawPayload: message,
+          });
+        }
+      }
     }
 
     context.lastAssistantUuid = message.uuid;
@@ -4432,6 +4513,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTotalProcessedTokens: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
         lastThreadStartedId: undefined,
+        lastStreamedMessageId: undefined,
         stopped: false,
       };
       yield* Ref.set(contextRef, context);

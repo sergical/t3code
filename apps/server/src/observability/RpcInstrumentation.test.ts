@@ -5,6 +5,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Metric from "effect/Metric";
+import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import * as TestClock from "effect/testing/TestClock";
@@ -252,6 +253,28 @@ describe("RpcInstrumentation", () => {
 
       assert.equal(spanNames.includes("ws.rpc.rpc.instrumentation.traced.stream"), true);
       assert.equal(spanNames.includes("rpc.instrumentation.traced.stream.child"), true);
+    }),
+  );
+
+  it.effect("starts a new trace for each traced RPC handler", () =>
+    Effect.gen(function* () {
+      const spans: Array<Tracer.NativeSpan> = [];
+      const tracer = Tracer.make({
+        span: (options) => {
+          const span = new Tracer.NativeSpan(options);
+          spans.push(span);
+          return span;
+        },
+      });
+
+      yield* observeRpcEffect("rpc.instrumentation.root", Effect.void, {
+        "rpc.aggregate": "test",
+      }).pipe(Effect.withSpan("ws.connection"), Effect.withTracer(tracer));
+
+      const connection = spans.find((span) => span.name === "ws.connection");
+      const request = spans.find((span) => span.name === "ws.rpc.rpc.instrumentation.root");
+      assert.equal(Option.isNone(request!.parent), true);
+      assert.notEqual(request!.traceId, connection!.traceId);
     }),
   );
 

@@ -13,6 +13,7 @@ import * as ServerConfig from "../../config.ts";
 import * as ResourceAttribution from "../../resourceTelemetry/ResourceAttribution.ts";
 import { ServerLoggerLive } from "../../serverLogger.ts";
 import * as BrowserTraceCollector from "../BrowserTraceCollector.ts";
+import { makeSentryTracer } from "./Sentry.ts";
 
 const otlpSerializationLayer = OtlpSerialization.layerJson;
 
@@ -43,20 +44,26 @@ export const ObservabilityLive = Layer.unwrap(
               durationMs: stats.durationMs,
             }),
         });
+        if (config.sentryDsn !== undefined && config.otlpTracesUrl !== undefined) {
+          yield* Effect.logWarning("SENTRY_DSN set; T3CODE_OTLP_TRACES_URL ignored for traces");
+        }
+
         const delegate =
-          config.otlpTracesUrl === undefined
-            ? undefined
-            : yield* OtlpTracer.make({
-                url: config.otlpTracesUrl,
-                exportInterval: `${config.otlpExportIntervalMs} millis`,
-                resource: {
-                  serviceName: config.otlpServiceName,
-                  attributes: {
-                    "service.runtime": "t3-server",
-                    "service.mode": config.mode,
+          config.sentryDsn !== undefined
+            ? yield* makeSentryTracer({ mode: config.mode, sentryDsn: config.sentryDsn })
+            : config.otlpTracesUrl === undefined
+              ? undefined
+              : yield* OtlpTracer.make({
+                  url: config.otlpTracesUrl,
+                  exportInterval: `${config.otlpExportIntervalMs} millis`,
+                  resource: {
+                    serviceName: config.otlpServiceName,
+                    attributes: {
+                      "service.runtime": "t3-server",
+                      "service.mode": config.mode,
+                    },
                   },
-                },
-              });
+                });
 
         const tracer = yield* makeLocalFileTracer({
           filePath: config.serverTracePath,

@@ -444,7 +444,7 @@ class LocalFileSpan implements Tracer.Span {
   status: Tracer.SpanStatus;
   attributes: Map<string, unknown>;
   events: Array<[name: string, startTime: bigint, attributes: Record<string, unknown>]>;
-  private readonly delegate: Tracer.Span;
+  readonly delegate: Tracer.Span;
   private readonly push: (record: EffectTraceRecord) => void;
 
   constructor(
@@ -522,7 +522,10 @@ export const makeLocalFileTracer = Effect.fn("makeLocalFileTracer")(function* (
 
   return Tracer.make({
     span(spanOptions) {
-      return new LocalFileSpan(spanOptions, delegate.span(spanOptions), sink.push);
+      const parent = Option.map(spanOptions.parent, (span) =>
+        span instanceof LocalFileSpan ? span.delegate : span,
+      );
+      return new LocalFileSpan(spanOptions, delegate.span({ ...spanOptions, parent }), sink.push);
     },
     ...(delegate.context ? { context: delegate.context } : {}),
   });

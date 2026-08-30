@@ -68,6 +68,7 @@ export class ServerConfig extends Context.Service<
     readonly otlpMetricsUrl: string | undefined;
     readonly otlpExportIntervalMs: number;
     readonly otlpServiceName: string;
+    readonly sentryDsn?: string | undefined;
     readonly mode: RuntimeMode;
     readonly port: number;
     readonly host: string | undefined;

@@ -173,6 +173,48 @@ Do not rely on launching from Finder, Spotlight, the dock, or the Start menu aft
 
 The backend reads observability config at process start. If you change OTLP env vars, stop the app completely and start it again.
 
+### Sentry
+
+Set `SENTRY_DSN` on the server to send every Effect span — including the gen_ai
+agent spans described below — to that Sentry project. It takes precedence over
+`T3CODE_OTLP_TRACES_URL` for traces (the local trace file keeps working
+either way); metrics are unaffected and still follow `T3CODE_OTLP_METRICS_URL`.
+
+Set `VITE_SENTRY_DSN` at web build time to send browser errors and traces to a
+Sentry project. Unset either variable and nothing changes.
+
+gen_ai spans (`gen_ai.invoke_agent` / `gen_ai.chat` / `gen_ai.execute_tool`)
+are provider-agnostic: one reactor watches the runtime event stream every
+adapter already emits, and every span carries `gen_ai.conversation.id` set to
+the thread id, so agent runs group by thread regardless of provider. A turn is
+one `invoke_agent` span; each model response inside it is one `chat` span
+(opened on the first streamed text or tool call, closed by the token-usage
+snapshot the adapter emits when the response ends) with its own usage, so
+Sentry's Agents conversation view shows a transcript and per-call token counts.
+Subagents appear as nested `invoke_agent` spans under the tool call that
+launched them. A background subagent stays open past the turn that launched it
+and its report becomes the input of the follow-up turn that delivers it to the
+model. Tool calls a subagent makes are not on the runtime stream, so they have
+no spans.
+
+Turn spans also carry conversation content: the user prompt
+(`gen_ai.input.messages`), the assistant reply (`gen_ai.output.messages`), and
+each tool call's input and output (`gen_ai.tool.input` / `gen_ai.tool.output`,
+in whatever shape the adapter reported). Values are capped at 16,000
+characters. This follows Sentry's `dataCollection.genAI` defaults (inputs and
+outputs on), and Sentry's server-side data scrubbing still applies.
+
+A WebSocket request, the orchestration command span it triggers, the reactor
+work that command's events wake up, and the provider turn that follows
+(`invoke_agent`) all land in one trace. The engine stamps the command span onto
+every event it persists, and the reactor and the turn tracer pick that stamp
+back up to continue the same trace, so a single Sentry trace shows the whole
+path from client request to agent response.
+
+A turn that ends in failure is also reported as a Sentry issue
+(`AgentTurnFailed`, tagged with the thread and turn ids) linked to its trace.
+Turns the user stops or cancels are not failures and create no issue.
+
 ## How To Use Traces And Metrics To Debug The Server
 
 ### Start With The Local Trace File
