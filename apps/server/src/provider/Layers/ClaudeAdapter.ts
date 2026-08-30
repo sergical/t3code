@@ -180,7 +180,10 @@ function toSessionPermissionUpdates(
   suggestions: ReadonlyArray<PermissionUpdate> | undefined,
 ): Array<PermissionUpdate> {
   const sessionScoped = (suggestions ?? []).map(
-    (suggestion): PermissionUpdate => ({ ...suggestion, destination: "session" }),
+    (suggestion): PermissionUpdate => ({
+      ...suggestion,
+      destination: "session",
+    }),
   );
   if (sessionScoped.length > 0) {
     return sessionScoped;
@@ -737,7 +740,9 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
 
 function isToolUseBlockType<T extends { readonly type?: unknown }>(
   block: T,
-): block is T & { readonly type: "tool_use" | "server_tool_use" | "mcp_tool_use" } {
+): block is T & {
+  readonly type: "tool_use" | "server_tool_use" | "mcp_tool_use";
+} {
   return (
     block.type === "tool_use" || block.type === "server_tool_use" || block.type === "mcp_tool_use"
   );
@@ -1817,9 +1822,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
   });
 
-  const updateResumeCursor = Effect.fn("updateResumeCursor")(function* (
-    context: ClaudeSessionContext,
-  ) {
+  const updateResumeCursor = Effect.fnUntraced(function* (context: ClaudeSessionContext) {
     const threadId = context.session.threadId;
     if (!threadId) return;
 
@@ -1837,7 +1840,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     };
   });
 
-  const ensureAssistantTextBlock = Effect.fn("ensureAssistantTextBlock")(function* (
+  const ensureAssistantTextBlock = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     blockIndex: number,
     options?: {
@@ -2020,7 +2023,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     context: ClaudeSessionContext,
     options: {
       readonly index: number;
-      readonly block: { readonly id: string; readonly name: string; readonly input: unknown };
+      readonly block: {
+        readonly id: string;
+        readonly name: string;
+        readonly input: unknown;
+      };
       readonly parentToolUseId: string | undefined;
       readonly rawMethod: string;
       readonly rawPayload: unknown;
@@ -2090,7 +2097,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     });
   });
 
-  const ensureThreadId = Effect.fn("ensureThreadId")(function* (
+  const ensureThreadId = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
@@ -2513,7 +2520,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* updateResumeCursor(context);
   });
 
-  const handleStreamEvent = Effect.fn("handleStreamEvent")(function* (
+  const handleStreamEvent = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
@@ -3055,7 +3062,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           if (!block || typeof block !== "object") {
             continue;
           }
-          const toolUseBlock = block as { type?: unknown; id?: unknown; name?: unknown };
+          const toolUseBlock = block as {
+            type?: unknown;
+            id?: unknown;
+            name?: unknown;
+          };
           if (
             !isToolUseBlockType(toolUseBlock) ||
             typeof toolUseBlock.id !== "string" ||
@@ -3656,7 +3667,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
-  const handleSdkMessage = Effect.fn("handleSdkMessage")(function* (
+  const handleSdkMessage = Effect.fnUntraced(function* (
     context: ClaudeSessionContext,
     message: SDKMessage,
   ) {
@@ -4574,7 +4585,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             }
             return handleStreamExit(context, exit).pipe(
               Effect.catch((cause) =>
-                Effect.logError("Failed to close Claude runtime stream.", { cause }),
+                Effect.logError("Failed to close Claude runtime stream.", {
+                  cause,
+                }),
               ),
             );
           }),
@@ -4803,7 +4816,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   yield* Effect.addFinalizer(() =>
     stopSessions(Array.from(sessions.values()), false).pipe(
       Effect.catch((cause) =>
-        Effect.logError("Failed to emit Claude session shutdown event.", { cause }),
+        Effect.logError("Failed to emit Claude session shutdown event.", {
+          cause,
+        }),
       ),
       Effect.tap(() => Queue.shutdown(runtimeEventQueue)),
       Effect.tap(() => managedNativeEventLogger?.close() ?? Effect.void),

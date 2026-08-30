@@ -189,7 +189,13 @@ const tokenUsageUpdated = (inputTokens = 10, outputTokens = 5): ProviderRuntimeE
   createdAt: now(),
   turnId,
   type: "thread.token-usage.updated",
-  payload: { usage: { usedTokens: inputTokens + outputTokens, inputTokens, outputTokens } },
+  payload: {
+    usage: {
+      usedTokens: inputTokens + outputTokens,
+      inputTokens,
+      outputTokens,
+    },
+  },
 });
 
 const turnCompleted = (
@@ -268,7 +274,9 @@ describe("ProviderTurnTracing", () => {
         const spans = yield* runScenario(
           [
             turnStarted(),
-            itemStarted({ data: { toolName: "Bash", input: { command: "ls" } } }),
+            itemStarted({
+              data: { toolName: "Bash", input: { command: "ls" } },
+            }),
             contentDelta("Here are"),
             contentDelta(" the files."),
             itemCompleted({ data: { result: "a.ts\nb.ts" } }),
@@ -288,6 +296,7 @@ describe("ProviderTurnTracing", () => {
           return;
         }
 
+        assert.equal(toolSpan.name, "execute_tool Bash");
         assert.equal(turnSpan.attributes.get("gen_ai.conversation.id"), threadId);
         assert.equal(
           turnSpan.attributes.get("gen_ai.input.messages"),
@@ -311,7 +320,7 @@ describe("ProviderTurnTracing", () => {
         );
         assert.equal(
           chatSpan.attributes.get("gen_ai.output.messages"),
-          '[{"role":"assistant","parts":[{"type":"text","content":"Here are the files."},{"type":"tool_call","id":"item-1","name":"command_execution","arguments":"{\\"command\\":\\"ls\\"}"}],"finish_reason":"tool_call"}]',
+          '[{"role":"assistant","parts":[{"type":"text","content":"Here are the files."},{"type":"tool_call","id":"item-1","name":"Bash","arguments":"{\\"command\\":\\"ls\\"}"}],"finish_reason":"tool_call"}]',
         );
         assert.equal(chatSpan.attributes.get("gen_ai.response.finish_reasons"), '["tool_call"]');
         assert.equal(chatSpan.attributes.get("gen_ai.usage.input_tokens"), 10);
@@ -432,9 +441,15 @@ describe("ProviderTurnTracing", () => {
       const spans = yield* runScenario([
         turnStarted(),
         itemStarted({ data: { toolName: "Agent", input: {} } }),
-        itemUpdated({ data: { toolName: "Agent", input: { prompt: "map the repo" } } }),
+        itemUpdated({
+          data: { toolName: "Agent", input: { prompt: "map the repo" } },
+        }),
         itemCompleted({
-          data: { toolName: "Agent", input: { prompt: "map the repo" }, result: "done" },
+          data: {
+            toolName: "Agent",
+            input: { prompt: "map the repo" },
+            result: "done",
+          },
         }),
         turnCompleted("completed"),
       ]);
@@ -527,7 +542,13 @@ describe("ProviderTurnTracing", () => {
     Effect.gen(function* () {
       const spans = yield* runScenario(
         [turnStarted(), turnCompleted("completed")],
-        [turnStartRequested({ traceId: "trace-request", spanId: "span-request", sampled: true })],
+        [
+          turnStartRequested({
+            traceId: "trace-request",
+            spanId: "span-request",
+            sampled: true,
+          }),
+        ],
       );
 
       const turnSpan = spans.find((span) => span.name.startsWith("invoke_agent"));

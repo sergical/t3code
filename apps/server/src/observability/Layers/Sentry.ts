@@ -65,6 +65,12 @@ const continuedTraceBaggage = (traceId: string, sampled: boolean, environment: s
   ].join(",");
 };
 
+// Sentry files a span without an op under "default". Effect spans are named
+// but carry no op, so give every span one that Sentry groups by; a span that
+// sets its own `sentry.op` attribute later (the gen_ai spans) overrides it.
+const defaultOp = (name: string) =>
+  name.startsWith("sql.") ? "db" : name.startsWith("ws.rpc.") ? "rpc" : "function";
+
 export const makeSentryTracer = Effect.fn("makeSentryTracer")(function* (
   config: Pick<ServerConfig["Service"], "mode"> & {
     readonly sentryDsn: string;
@@ -79,7 +85,11 @@ export const makeSentryTracer = Effect.fn("makeSentryTracer")(function* (
   const sentryTracer = Sentry.SentryEffectTracer;
   return Tracer.make({
     span: (options) => {
-      const open = () => captureFailedTurn(sentryTracer.span(options));
+      const open = () => {
+        const span = captureFailedTurn(sentryTracer.span(options));
+        span.attribute("sentry.op", defaultOp(options.name));
+        return span;
+      };
       const parent = options.parent;
       if (Option.isNone(parent)) return Sentry.startNewTrace(open);
       if (parent.value._tag === "ExternalSpan") {

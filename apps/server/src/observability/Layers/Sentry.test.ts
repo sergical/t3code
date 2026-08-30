@@ -35,7 +35,10 @@ describe("makeSentryTracer", () => {
             sampled: true,
           }),
         });
-        const chat = yield* Effect.makeSpan("chat claude", { parent: turn });
+        const chat = yield* Effect.makeSpan("chat claude", {
+          parent: turn,
+          attributes: { "sentry.op": "gen_ai.chat" },
+        });
         const now = yield* Clock.currentTimeNanos;
         chat.end(now, Exit.void);
         turn.end(now, Exit.void);
@@ -44,9 +47,10 @@ describe("makeSentryTracer", () => {
       const transaction = yield* Effect.promise(() => captured);
       assert.equal(transaction.contexts?.trace?.parent_span_id, requestSpanId);
       assert.deepEqual(
-        transaction.spans?.map((span) => span.description),
-        ["chat claude"],
+        transaction.spans?.map((span) => [span.description, span.op]),
+        [["chat claude", "gen_ai.chat"]],
       );
+      assert.equal(transaction.contexts?.trace?.op, "function");
       const dsc = transaction.sdkProcessingMetadata?.dynamicSamplingContext;
       assert.equal(dsc?.trace_id, traceId);
       assert.equal(dsc?.public_key, "publickey");

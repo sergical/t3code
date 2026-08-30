@@ -60,6 +60,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 // Codex the raw provider payload. Split the Claude shape so the output attribute
 // does not repeat the input, and fall back to the whole payload otherwise.
 const toolInput = (data: unknown) => (isRecord(data) && "input" in data ? data.input : data);
+const toolName = (data: unknown) =>
+  isRecord(data) && typeof data.toolName === "string" ? data.toolName : undefined;
 const toolOutput = (data: unknown) => (isRecord(data) && "result" in data ? data.result : data);
 
 interface StepUsage {
@@ -283,7 +285,12 @@ const make = Effect.gen(function* () {
           threadId: event.threadId,
           model: event.payload.model,
           tools: new Map(),
-          usage: { input: 0, output: 0, cached: undefined, reasoning: undefined },
+          usage: {
+            input: 0,
+            output: 0,
+            cached: undefined,
+            reasoning: undefined,
+          },
           stepInput: inputs,
           step: undefined,
           responseText: "",
@@ -302,7 +309,7 @@ const make = Effect.gen(function* () {
         ) {
           return;
         }
-        const name = event.payload.title ?? event.payload.itemType;
+        const name = toolName(event.payload.data) ?? event.payload.title ?? event.payload.itemType;
         const input = toolInput(event.payload.data) ?? event.payload.detail;
         const step = yield* openStep(turn, event.provider);
         step.toolCalls.set(itemId, {
@@ -387,7 +394,9 @@ const make = Effect.gen(function* () {
             "gen_ai.conversation.id": turn.threadId,
             ...(payload.model ? { "gen_ai.request.model": payload.model } : {}),
             ...(payload.description
-              ? { "gen_ai.input.messages": encodeMessages("user", clip(payload.description)) }
+              ? {
+                  "gen_ai.input.messages": encodeMessages("user", clip(payload.description)),
+                }
               : {}),
             "t3.task.id": payload.taskId,
           },
@@ -414,7 +423,10 @@ const make = Effect.gen(function* () {
           // Delivered between turns, the report becomes the input of the
           // synthetic turn the adapter starts to hand it to the model.
           if (event.turnId === undefined) {
-            pushPendingInput(agent.threadId, { role: "tool", content: summary });
+            pushPendingInput(agent.threadId, {
+              role: "tool",
+              content: summary,
+            });
           }
         }
         yield* endSpan(
