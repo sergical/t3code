@@ -69,6 +69,8 @@ export class ServerConfig extends Context.Service<
     readonly otlpExportIntervalMs: number;
     readonly otlpServiceName: string;
     readonly sentryDsn?: string | undefined;
+    /** Record prompts, replies, and tool payloads on gen_ai spans. */
+    readonly traceGenAiContent: boolean;
     readonly mode: RuntimeMode;
     readonly port: number;
     readonly host: string | undefined;
@@ -190,6 +192,7 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
     otlpMetricsUrl: undefined,
     otlpExportIntervalMs: 10_000,
     otlpServiceName: "t3-server",
+    traceGenAiContent: false,
     cwd,
     baseDir,
     ...derivedPaths,

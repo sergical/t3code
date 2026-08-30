@@ -99,6 +99,10 @@ const EnvServerConfig = Config.all({
   ),
   otlpServiceName: Config.string("T3CODE_OTLP_SERVICE_NAME").pipe(Config.withDefault("t3-server")),
   sentryDsn: Config.string("SENTRY_DSN").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  traceGenAiContent: Config.boolean("T3CODE_TRACE_GENAI_CONTENT").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
   mode: Config.schema(ServerConfig.RuntimeMode, "T3CODE_MODE").pipe(
     Config.option,
     Config.map(Option.getOrUndefined),
@@ -368,6 +372,9 @@ export const resolveServerConfig = (
       otlpExportIntervalMs: env.otlpExportIntervalMs,
       otlpServiceName: env.otlpServiceName,
       sentryDsn: env.sentryDsn,
+      // Conversation content is only worth its exposure where Sentry's scrubbing
+      // applies; the local trace file and OTLP get it on explicit opt-in.
+      traceGenAiContent: env.traceGenAiContent ?? env.sentryDsn !== undefined,
       mode,
       port,
       cwd,

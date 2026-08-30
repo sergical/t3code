@@ -181,7 +181,9 @@ agent spans described below — to that Sentry project. It takes precedence over
 either way); metrics are unaffected and still follow `T3CODE_OTLP_METRICS_URL`.
 
 Set `VITE_SENTRY_DSN` at web build time to send browser errors and traces to a
-Sentry project. Unset either variable and nothing changes.
+Sentry project. Pairing tokens are filtered out of every event the browser
+sends, because the pairing page keeps the token in the URL until it is used.
+Unset either variable and nothing changes.
 
 gen_ai spans (`gen_ai.invoke_agent` / `gen_ai.chat` / `gen_ai.execute_tool`)
 are provider-agnostic: one reactor watches the runtime event stream every
@@ -192,10 +194,14 @@ one `invoke_agent` span; each model response inside it is one `chat` span
 snapshot the adapter emits when the response ends) with its own usage, so
 Sentry's Agents conversation view shows a transcript and per-call token counts.
 Subagents appear as nested `invoke_agent` spans under the tool call that
-launched them. A background subagent stays open past the turn that launched it
-and its report becomes the input of the follow-up turn that delivers it to the
-model. Tool calls a subagent makes are not on the runtime stream, so they have
-no spans.
+launched them. A background subagent that outlives its turn is split in two:
+the launch segment (`t3.task.background: true`) ends with the turn, and a
+continuation span with the same name (`t3.task.segment: background`) is
+parented to it and ends when the task reports. Sentry only exports child spans
+inside their root's transaction, so the continuation has to be its own segment
+to survive. The subagent's report becomes the input of the follow-up turn that
+delivers it to the model. Tool calls a subagent makes are not on the runtime
+stream, so they have no spans.
 
 Turn spans also carry conversation content: the user prompt
 (`gen_ai.input.messages`), the assistant reply (`gen_ai.output.messages`), and
@@ -203,6 +209,11 @@ each tool call's input and output (`gen_ai.tool.input` / `gen_ai.tool.output`,
 in whatever shape the adapter reported). Values are capped at 16,000
 characters. This follows Sentry's `dataCollection.genAI` defaults (inputs and
 outputs on), and Sentry's server-side data scrubbing still applies.
+
+Content is recorded only when `T3CODE_TRACE_GENAI_CONTENT` is on. It defaults
+to on when `SENTRY_DSN` is set and off otherwise, so the local trace file and a
+plain OTLP collector do not receive prompts and tool payloads unless you ask
+for them. Span structure, names, models, and token counts are always recorded.
 
 A WebSocket request, the orchestration command span it triggers, the reactor
 work that command's events wake up, and the provider turn that follows
@@ -216,7 +227,9 @@ key); without it Sentry keeps the `invoke_agent` span but drops its `chat` and
 
 A turn that ends in failure is also reported as a Sentry issue
 (`AgentTurnFailed`, tagged with the thread and turn ids) linked to its trace.
-Turns the user stops or cancels are not failures and create no issue.
+Turns the user stops (`turn.aborted`) and subagents that were stopped end with
+an interrupt, not a failure, and create no issue; only `turn.completed` with a
+failed state and a failed task do.
 
 ## How To Use Traces And Metrics To Debug The Server
 

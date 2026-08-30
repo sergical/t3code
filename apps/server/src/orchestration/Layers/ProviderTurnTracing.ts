@@ -20,6 +20,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 
+import { ServerConfig } from "../../config.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -170,10 +171,24 @@ interface TrackedTurn {
 const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const orchestrationEngine = yield* OrchestrationEngineService;
+  const { traceGenAiContent } = yield* ServerConfig;
+
+  // Prompts, replies, and tool payloads only reach spans when content tracing is on.
+  const contentAttr = (key: string, value: string | undefined) =>
+    traceGenAiContent && value !== undefined ? { [key]: value } : {};
+  const setContent = (span: Tracer.Span, key: string, value: string) => {
+    if (traceGenAiContent) span.attribute(key, value);
+  };
 
   const turns = new Map<TurnId, TrackedTurn>();
   const getTurn = (turnId: TurnId | undefined) =>
     turnId !== undefined ? turns.get(turnId) : undefined;
+  const activeTurn = (threadId: ThreadId) => {
+    for (const turn of turns.values()) {
+      if (turn.threadId === threadId) return turn;
+    }
+    return undefined;
+  };
 
   // Input for a thread's next turn. The decider emits `thread.message-sent`
   // (role user, turnId: null) right before it starts the turn, and a background
@@ -189,9 +204,15 @@ const make = Effect.gen(function* () {
   /** Trace of the turn-start request, so `invoke_agent` continues it instead of starting a new trace. */
   const pendingTraces = new Map<ThreadId, OrchestrationTraceContext>();
 
+  interface TrackedAgent {
+    readonly span: Tracer.Span;
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId | undefined;
+  }
+
   // Subagent spans keyed by task id. A background agent outlives the turn that
   // launched it and reports progress with no turn id.
-  const agents = new Map<RuntimeTaskId, { span: Tracer.Span; threadId: ThreadId }>();
+  const agents = new Map<RuntimeTaskId, TrackedAgent>();
 
   const endSpan = Effect.fn(function* (span: Tracer.Span, exit: Exit.Exit<unknown, unknown>) {
     const now = yield* Clock.currentTimeNanos;
@@ -209,9 +230,10 @@ const make = Effect.gen(function* () {
         "gen_ai.system": GEN_AI_SYSTEM[provider] ?? provider,
         "gen_ai.conversation.id": turn.threadId,
         ...(turn.model ? { "gen_ai.request.model": turn.model } : {}),
-        ...(turn.stepInput.length > 0
-          ? { "gen_ai.input.messages": encodeJson(turn.stepInput) }
-          : {}),
+        ...contentAttr(
+          "gen_ai.input.messages",
+          turn.stepInput.length > 0 ? encodeJson(turn.stepInput) : undefined,
+        ),
       },
     });
     turn.stepInput = [];
@@ -228,7 +250,8 @@ const make = Effect.gen(function* () {
     if (step === undefined) return;
     turn.step = undefined;
     const finishReason = step.toolCalls.size > 0 ? "tool_call" : "stop";
-    step.span.attribute(
+    setContent(
+      step.span,
       "gen_ai.output.messages",
       encodeJson([
         {
@@ -255,18 +278,48 @@ const make = Effect.gen(function* () {
     yield* endSpan(step.span, exit);
   });
 
-  const endTurn = Effect.fn(function* (turn: TrackedTurn, exit: Exit.Exit<unknown, unknown>) {
+  const endTurn = Effect.fn(function* (
+    turnId: TurnId,
+    turn: TrackedTurn,
+    exit: Exit.Exit<unknown, unknown>,
+  ) {
     yield* closeStep(turn, exit);
     for (const tool of turn.tools.values()) {
       yield* endSpan(tool, exit);
     }
     if (turn.responseText !== "") {
-      turn.span.attribute(
+      setContent(
+        turn.span,
         "gen_ai.output.messages",
         encodeMessages("assistant", clip(turn.responseText)),
       );
     }
+    for (const [taskId, agent] of agents) {
+      if (agent.turnId !== turnId) continue;
+      yield* detachAgent(taskId, agent);
+    }
     yield* endSpan(turn.span, exit);
+  });
+
+  // Sentry only exports a child span inside its root's transaction, so a
+  // subagent still running when its turn ends would be lost. End the launch
+  // segment with the turn and continue the agent as its own trace segment
+  // parented to it, which Sentry exports on its own when the task completes.
+  const detachAgent = Effect.fn(function* (taskId: RuntimeTaskId, agent: TrackedAgent) {
+    const launch = agent.span;
+    launch.attribute("t3.task.background", true);
+    yield* endSpan(launch, Exit.succeed(undefined));
+    const attributes = Object.fromEntries(launch.attributes);
+    const span = yield* Effect.makeSpan(launch.name, {
+      kind: "internal",
+      parent: Tracer.externalSpan({
+        traceId: launch.traceId,
+        spanId: launch.spanId,
+        sampled: launch.sampled,
+      }),
+      attributes: { ...attributes, "t3.task.segment": "background" },
+    });
+    agents.set(taskId, { ...agent, span, turnId: undefined });
   });
 
   // Claude and Codex announce a tool with item.started; the ACP adapters (Cursor,
@@ -311,7 +364,7 @@ const make = Effect.gen(function* () {
         "gen_ai.tool.name": name,
         "gen_ai.tool.type": event.payload.itemType,
         "gen_ai.tool.call.id": itemId,
-        ...(input !== undefined ? { "gen_ai.tool.input": encodeJson(input) } : {}),
+        ...contentAttr("gen_ai.tool.input", input !== undefined ? encodeJson(input) : undefined),
       },
     });
     turn.tools.set(itemId, tool);
@@ -336,7 +389,10 @@ const make = Effect.gen(function* () {
             "gen_ai.system": GEN_AI_SYSTEM[event.provider] ?? event.provider,
             "gen_ai.conversation.id": event.threadId,
             ...(event.payload.model ? { "gen_ai.request.model": event.payload.model } : {}),
-            ...(inputs.length > 0 ? { "gen_ai.input.messages": encodeJson(inputs) } : {}),
+            ...contentAttr(
+              "gen_ai.input.messages",
+              inputs.length > 0 ? encodeJson(inputs) : undefined,
+            ),
             "t3.thread.id": event.threadId,
             "t3.turn.id": event.turnId,
           },
@@ -371,7 +427,7 @@ const make = Effect.gen(function* () {
         const input = toolInput(event.payload.data);
         if (turn === undefined || tool === undefined || input === undefined) return;
         const encoded = encodeJson(input);
-        tool.attribute("gen_ai.tool.input", encoded);
+        setContent(tool, "gen_ai.tool.input", encoded);
         const part =
           event.itemId !== undefined ? turn.step?.toolCalls.get(event.itemId) : undefined;
         if (part !== undefined) part.arguments = encoded;
@@ -385,7 +441,7 @@ const make = Effect.gen(function* () {
         const output = toolOutput(event.payload.data) ?? event.payload.detail;
         if (output !== undefined) {
           const encoded = encodeJson(output);
-          tool.attribute("gen_ai.tool.output", encoded);
+          setContent(tool, "gen_ai.tool.output", encoded);
           turn.stepInput.push({ role: "tool", content: encoded });
         }
         yield* endSpan(
@@ -419,15 +475,14 @@ const make = Effect.gen(function* () {
             "gen_ai.system": GEN_AI_SYSTEM[event.provider] ?? event.provider,
             "gen_ai.conversation.id": turn.threadId,
             ...(payload.model ? { "gen_ai.request.model": payload.model } : {}),
-            ...(payload.description
-              ? {
-                  "gen_ai.input.messages": encodeMessages("user", clip(payload.description)),
-                }
-              : {}),
+            ...contentAttr(
+              "gen_ai.input.messages",
+              payload.description ? encodeMessages("user", clip(payload.description)) : undefined,
+            ),
             "t3.task.id": payload.taskId,
           },
         });
-        agents.set(payload.taskId, { span: agent, threadId: turn.threadId });
+        agents.set(payload.taskId, { span: agent, threadId: turn.threadId, turnId: event.turnId });
         return;
       }
       case "task.progress": {
@@ -445,7 +500,7 @@ const make = Effect.gen(function* () {
         applyTaskUpdate(agent.span, payload);
         if (payload.summary) {
           const summary = clip(payload.summary);
-          agent.span.attribute("gen_ai.output.messages", encodeMessages("assistant", summary));
+          setContent(agent.span, "gen_ai.output.messages", encodeMessages("assistant", summary));
           // Delivered between turns, the report becomes the input of the
           // synthetic turn the adapter starts to hand it to the model.
           if (event.turnId === undefined) {
@@ -457,7 +512,11 @@ const make = Effect.gen(function* () {
         }
         yield* endSpan(
           agent.span,
-          payload.status === "completed" ? Exit.succeed(undefined) : Exit.fail(payload.status),
+          payload.status === "failed"
+            ? Exit.fail(payload.status)
+            : payload.status === "completed"
+              ? Exit.succeed(undefined)
+              : Exit.interrupt(),
         );
         agents.delete(payload.taskId);
         return;
@@ -489,6 +548,7 @@ const make = Effect.gen(function* () {
           encodeFinishReasons([event.payload.stopReason ?? event.payload.state]),
         );
         yield* endTurn(
+          turnId,
           turn,
           event.payload.state === "completed"
             ? Exit.succeed(undefined)
@@ -503,21 +563,24 @@ const make = Effect.gen(function* () {
         const { turnId } = event;
         const turn = getTurn(turnId);
         if (turn === undefined || turnId === undefined) return;
-        yield* endTurn(turn, Exit.fail(event.payload.reason));
+        // A stop is the user's choice, not a failure; only turn.completed carries provider errors.
+        yield* endTurn(turnId, turn, Exit.interrupt());
         turns.delete(turnId);
         return;
       }
       case "session.exited": {
         for (const [turnId, turn] of turns) {
           if (turn.threadId !== event.threadId) continue;
-          yield* endTurn(turn, Exit.fail("session exited"));
+          yield* endTurn(turnId, turn, Exit.interrupt());
           turns.delete(turnId);
         }
         for (const [taskId, agent] of agents) {
           if (agent.threadId !== event.threadId) continue;
-          yield* endSpan(agent.span, Exit.fail("session exited"));
+          yield* endSpan(agent.span, Exit.interrupt());
           agents.delete(taskId);
         }
+        pendingInputs.delete(event.threadId);
+        pendingTraces.delete(event.threadId);
         return;
       }
       default:
@@ -528,12 +591,18 @@ const make = Effect.gen(function* () {
   const handleDomainEvent = (event: OrchestrationEvent) =>
     Effect.sync(() => {
       if (event.type === "thread.message-sent" && event.payload.role === "user") {
-        pushPendingInput(event.payload.threadId, {
-          role: "user",
-          content: clip(event.payload.text),
-        });
+        const input: StepInput = { role: "user", content: clip(event.payload.text) };
+        // Every adapter steers a message sent mid-turn into the running turn,
+        // where the model reads it on its next response.
+        const turn = activeTurn(event.payload.threadId);
+        if (turn !== undefined) turn.stepInput.push(input);
+        else pushPendingInput(event.payload.threadId, input);
       }
-      if (event.type === "thread.turn-start-requested" && event.metadata.trace) {
+      if (
+        event.type === "thread.turn-start-requested" &&
+        event.metadata.trace &&
+        activeTurn(event.payload.threadId) === undefined
+      ) {
         pendingTraces.set(event.payload.threadId, event.metadata.trace);
       }
     });

@@ -12,6 +12,7 @@ import {
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -19,6 +20,7 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 
+import { ServerConfig } from "../../config.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderTurnTracing } from "../Services/ProviderTurnTracing.ts";
@@ -111,19 +113,27 @@ const taskProgress = (background = false): ProviderRuntimeEvent => ({
   },
 });
 
-const taskCompleted = (background = false): ProviderRuntimeEvent => ({
+const taskCompleted = (
+  background = false,
+  status: "completed" | "failed" | "stopped" = "completed",
+): ProviderRuntimeEvent => ({
   eventId: nextEventId(),
   provider,
   threadId,
   createdAt: now(),
   ...(background ? {} : { turnId }),
   type: "task.completed",
-  payload: {
-    taskId,
-    status: "completed",
-    summary: "Found it.",
-    typedUsage: { totalTokens: 120, toolUses: 4 },
-  },
+  payload: { taskId, status, summary: "Found it.", typedUsage: { totalTokens: 120, toolUses: 4 } },
+});
+
+const turnAborted = (): ProviderRuntimeEvent => ({
+  eventId: nextEventId(),
+  provider,
+  threadId,
+  createdAt: now(),
+  turnId,
+  type: "turn.aborted",
+  payload: { reason: "Interrupted by user." },
 });
 
 const contentDelta = (delta: string): ProviderRuntimeEvent => ({
@@ -220,6 +230,11 @@ const turnCompleted = (
 const runScenario = (
   events: ReadonlyArray<ProviderRuntimeEvent>,
   domainEvents: ReadonlyArray<OrchestrationEvent> = [],
+  traceGenAiContent = true,
+  midTurn: {
+    readonly afterEvent: number;
+    readonly domainEvents: ReadonlyArray<OrchestrationEvent>;
+  } = { afterEvent: 0, domainEvents: [] },
 ) =>
   Effect.gen(function* () {
     const spans: Array<Tracer.NativeSpan> = [];
@@ -232,18 +247,32 @@ const runScenario = (
     });
 
     const domainDrained = yield* Deferred.make<void>();
+    const midTurnReached = yield* Deferred.make<void>();
+    const midTurnDrained = yield* Deferred.make<void>();
     const orchestrationEngineLayer = Layer.succeed(OrchestrationEngineService, {
       streamDomainEvents: Stream.fromIterable(domainEvents).pipe(
-        Stream.ensuring(Deferred.succeed(domainDrained, undefined)),
+        Stream.concat(Stream.fromEffect(Deferred.succeed(domainDrained, undefined))),
+        Stream.concat(Stream.fromEffect(Deferred.await(midTurnReached))),
+        Stream.concat(Stream.fromIterable(midTurn.domainEvents)),
+        Stream.ensuring(Deferred.succeed(midTurnDrained, undefined)),
+        Stream.filter((event): event is OrchestrationEvent => typeof event === "object"),
       ),
     } as OrchestrationEngineService["Service"]);
+
+    const configLayer = Layer.succeed(ServerConfig, {
+      traceGenAiContent,
+    } as ServerConfig["Service"]);
 
     const drained = yield* Deferred.make<void>();
     const providerServiceLayer = Layer.succeed(ProviderService, {
       // Waits for the domain stream to fully drain first, so a stashed prompt is
       // always in place before this stream's `turn.started` looks for it.
       streamEvents: Stream.fromEffect(Deferred.await(domainDrained)).pipe(
-        Stream.flatMap(() => Stream.fromIterable(events)),
+        Stream.flatMap(() => Stream.fromIterable(events.slice(0, midTurn.afterEvent))),
+        Stream.concat(Stream.fromEffect(Deferred.succeed(midTurnReached, undefined))),
+        Stream.concat(Stream.fromEffect(Deferred.await(midTurnDrained))),
+        Stream.concat(Stream.fromIterable(events.slice(midTurn.afterEvent))),
+        Stream.filter((event): event is ProviderRuntimeEvent => typeof event === "object"),
         Stream.ensuring(Deferred.succeed(drained, undefined)),
       ),
     } as ProviderService["Service"]);
@@ -257,7 +286,9 @@ const runScenario = (
     ).pipe(
       Effect.provide(
         ProviderTurnTracingLive.pipe(
-          Layer.provide(Layer.merge(providerServiceLayer, orchestrationEngineLayer)),
+          Layer.provide(
+            Layer.mergeAll(providerServiceLayer, orchestrationEngineLayer, configLayer),
+          ),
         ),
       ),
       Effect.withTracer(tracer),
@@ -407,11 +438,19 @@ describe("ProviderTurnTracing", () => {
         turnStarted(),
       ]);
 
-      const agentSpan = spans.find((span) => span.name === "invoke_agent Explore");
-      assert.equal(agentSpan?.attributes.get("gen_ai.request.model"), "claude-haiku-4-5");
-      assert.equal(agentSpan?.status._tag, "Ended");
-      if (agentSpan?.status._tag === "Ended") {
-        assert.equal(agentSpan.status.exit._tag, "Success");
+      // The launch segment ends with its turn; the background segment continues
+      // it as a separate trace segment and carries the final report and usage.
+      const [launch, background] = spans.filter((span) => span.name === "invoke_agent Explore");
+      assert.equal(launch?.attributes.get("t3.task.background"), true);
+      assert.equal(background?.parent._tag, "Some");
+      if (background?.parent._tag === "Some") {
+        assert.equal(background.parent.value.spanId, launch?.spanId);
+      }
+      assert.equal(background?.attributes.get("t3.task.segment"), "background");
+      assert.equal(background?.attributes.get("gen_ai.request.model"), "claude-haiku-4-5");
+      assert.equal(background?.status._tag, "Ended");
+      if (background?.status._tag === "Ended") {
+        assert.equal(background.status.exit._tag, "Success");
       }
       const nextTurn = spans.filter((span) => span.name === `invoke_agent ${provider}`)[1];
       assert.equal(
@@ -572,6 +611,87 @@ describe("ProviderTurnTracing", () => {
       assert.notEqual(output, undefined);
       assert.isTrue(output.includes("…[truncated]"));
       assert.isTrue(output.length < 16_200);
+    }),
+  );
+
+  it.effect(
+    "ends a user-stopped turn and a stopped subagent with an interrupt, not a failure",
+    () =>
+      Effect.gen(function* () {
+        const spans = yield* runScenario([
+          turnStarted(),
+          taskStarted(),
+          taskCompleted(false, "stopped"),
+          turnAborted(),
+        ]);
+
+        const genAi = spans.filter((span) => span.name.startsWith("invoke_agent "));
+        assert.equal(genAi.length, 2);
+        for (const span of genAi) {
+          assert.equal(span.status._tag, "Ended");
+          if (span.status._tag === "Ended") {
+            assert.equal(span.status.exit._tag, "Failure");
+            if (span.status.exit._tag === "Failure") {
+              assert.equal(Cause.hasInterruptsOnly(span.status.exit.cause), true);
+            }
+          }
+        }
+      }),
+  );
+
+  it.effect("steers a message sent mid-turn into the running turn's next model response", () =>
+    Effect.gen(function* () {
+      const spans = yield* runScenario(
+        [
+          turnStarted(),
+          contentDelta("first"),
+          tokenUsageUpdated(),
+          contentDelta("second"),
+          turnCompleted("completed"),
+          turnStarted(),
+        ],
+        [messageSent("start")],
+        true,
+        { afterEvent: 2, domainEvents: [messageSent("also do this")] },
+      );
+
+      const inputs = spans
+        .filter((span) => span.name.startsWith("chat "))
+        .map((span) => span.attributes.get("gen_ai.input.messages"));
+      assert.deepEqual(inputs, [
+        '[{"role":"user","content":"start"}]',
+        '[{"role":"user","content":"also do this"}]',
+        undefined,
+      ]);
+      const nextTurn = spans.filter((span) => span.name === `invoke_agent ${provider}`)[1];
+      assert.equal(nextTurn?.attributes.has("gen_ai.input.messages"), false);
+    }),
+  );
+
+  it.effect("omits prompts, replies, and tool payloads when content tracing is off", () =>
+    Effect.gen(function* () {
+      const spans = yield* runScenario(
+        [
+          turnStarted(),
+          contentDelta("reply"),
+          itemStarted({ data: { input: "ls" } }),
+          itemCompleted({ data: { output: "a" } }),
+          turnCompleted("completed"),
+        ],
+        [messageSent("hello")],
+        false,
+      );
+
+      const contentKeys = spans.flatMap((span) =>
+        [...span.attributes.keys()].filter((key) =>
+          /^gen_ai\.(input|output)\.messages$|^gen_ai\.tool\.(input|output)$/.test(key),
+        ),
+      );
+      assert.deepEqual(contentKeys, []);
+      assert.equal(
+        spans.some((span) => span.name.startsWith("execute_tool ")),
+        true,
+      );
     }),
   );
 
