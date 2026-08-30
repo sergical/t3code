@@ -56,13 +56,25 @@ const encodeMessages = (role: "user" | "assistant", content: string) =>
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;
 
-// Item `data` is the adapter's own shape. Claude carries {toolName, input, result};
-// Codex the raw provider payload. Split the Claude shape so the output attribute
-// does not repeat the input, and fall back to the whole payload otherwise.
-const toolInput = (data: unknown) => (isRecord(data) && "input" in data ? data.input : data);
-const toolName = (data: unknown) =>
-  isRecord(data) && typeof data.toolName === "string" ? data.toolName : undefined;
-const toolOutput = (data: unknown) => (isRecord(data) && "result" in data ? data.result : data);
+// Item `data` is the adapter's own shape. Claude carries {toolName, input, result},
+// OpenCode {tool, state: {input, output}}, Cursor and Grok (ACP) {rawInput, rawOutput},
+// and Codex the raw provider payload. Split the known shapes so the output
+// attribute does not repeat the input, and fall back to the whole payload otherwise.
+const firstField = (data: unknown, keys: ReadonlyArray<string>) => {
+  if (!isRecord(data)) return undefined;
+  const state = isRecord(data.state) ? data.state : undefined;
+  for (const key of keys) {
+    if (key in data) return data[key];
+    if (state !== undefined && key in state) return state[key];
+  }
+  return undefined;
+};
+const toolInput = (data: unknown) => firstField(data, ["input", "rawInput"]) ?? data;
+const toolName = (data: unknown) => {
+  const name = firstField(data, ["toolName", "tool"]);
+  return typeof name === "string" ? name : undefined;
+};
+const toolOutput = (data: unknown) => firstField(data, ["result", "output", "rawOutput"]) ?? data;
 
 interface StepUsage {
   input: number;
@@ -257,6 +269,55 @@ const make = Effect.gen(function* () {
     yield* endSpan(turn.span, exit);
   });
 
+  // Claude and Codex announce a tool with item.started; the ACP adapters (Cursor,
+  // Grok) only send item.updated and item.completed, so any of the three can be
+  // the first sight of a tool call.
+  const openTool = Effect.fn(function* (
+    event: Extract<
+      ProviderRuntimeEvent,
+      { type: "item.started" | "item.updated" | "item.completed" }
+    >,
+  ) {
+    const { turnId, itemId } = event;
+    const turn = getTurn(turnId);
+    if (
+      turn === undefined ||
+      itemId === undefined ||
+      !isToolLifecycleItemType(event.payload.itemType)
+    ) {
+      return undefined;
+    }
+    const existing = turn.tools.get(itemId);
+    if (existing !== undefined) return existing;
+    const name = toolName(event.payload.data) ?? event.payload.title ?? event.payload.itemType;
+    const input = toolInput(event.payload.data) ?? event.payload.detail;
+    const step = yield* openStep(turn, event.provider);
+    step.toolCalls.set(itemId, {
+      type: "tool_call",
+      id: itemId,
+      name,
+      arguments: input !== undefined ? encodeJson(input) : "",
+    });
+    const owner = event.payload.agentId
+      ? agents.get(event.payload.agentId as RuntimeTaskId)?.span
+      : undefined;
+    const tool = yield* Effect.makeSpan(`execute_tool ${name}`, {
+      kind: "internal",
+      parent: owner ?? turn.span,
+      attributes: {
+        "sentry.op": "gen_ai.execute_tool",
+        "gen_ai.operation.name": "execute_tool",
+        "gen_ai.conversation.id": turn.threadId,
+        "gen_ai.tool.name": name,
+        "gen_ai.tool.type": event.payload.itemType,
+        "gen_ai.tool.call.id": itemId,
+        ...(input !== undefined ? { "gen_ai.tool.input": encodeJson(input) } : {}),
+      },
+    });
+    turn.tools.set(itemId, tool);
+    return tool;
+  });
+
   const handle = Effect.fn(function* (event: ProviderRuntimeEvent) {
     switch (event.type) {
       case "turn.started": {
@@ -300,47 +361,13 @@ const make = Effect.gen(function* () {
         return;
       }
       case "item.started": {
-        const { turnId, itemId } = event;
-        const turn = getTurn(turnId);
-        if (
-          turn === undefined ||
-          itemId === undefined ||
-          !isToolLifecycleItemType(event.payload.itemType)
-        ) {
-          return;
-        }
-        const name = toolName(event.payload.data) ?? event.payload.title ?? event.payload.itemType;
-        const input = toolInput(event.payload.data) ?? event.payload.detail;
-        const step = yield* openStep(turn, event.provider);
-        step.toolCalls.set(itemId, {
-          type: "tool_call",
-          id: itemId,
-          name,
-          arguments: input !== undefined ? encodeJson(input) : "",
-        });
-        const owner = event.payload.agentId
-          ? agents.get(event.payload.agentId as RuntimeTaskId)?.span
-          : undefined;
-        const tool = yield* Effect.makeSpan(`execute_tool ${name}`, {
-          kind: "internal",
-          parent: owner ?? turn.span,
-          attributes: {
-            "sentry.op": "gen_ai.execute_tool",
-            "gen_ai.operation.name": "execute_tool",
-            "gen_ai.conversation.id": turn.threadId,
-            "gen_ai.tool.name": name,
-            "gen_ai.tool.type": event.payload.itemType,
-            "gen_ai.tool.call.id": itemId,
-            ...(input !== undefined ? { "gen_ai.tool.input": encodeJson(input) } : {}),
-          },
-        });
-        turn.tools.set(itemId, tool);
+        yield* openTool(event);
         return;
       }
       case "item.updated": {
         // Claude streams tool input after item.started; the input is only complete here.
         const turn = getTurn(event.turnId);
-        const tool = event.itemId !== undefined ? turn?.tools.get(event.itemId) : undefined;
+        const tool = yield* openTool(event);
         const input = toolInput(event.payload.data);
         if (turn === undefined || tool === undefined || input === undefined) return;
         const encoded = encodeJson(input);
@@ -353,8 +380,7 @@ const make = Effect.gen(function* () {
       case "item.completed": {
         const { turnId, itemId } = event;
         const turn = getTurn(turnId);
-        const tool =
-          turn !== undefined && itemId !== undefined ? turn.tools.get(itemId) : undefined;
+        const tool = yield* openTool(event);
         if (turn === undefined || tool === undefined || itemId === undefined) return;
         const output = toolOutput(event.payload.data) ?? event.payload.detail;
         if (output !== undefined) {

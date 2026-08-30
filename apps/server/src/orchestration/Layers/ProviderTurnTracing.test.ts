@@ -461,6 +461,59 @@ describe("ProviderTurnTracing", () => {
     }),
   );
 
+  it.effect("opens the tool span from item.updated when the adapter never sends item.started", () =>
+    Effect.gen(function* () {
+      const spans = yield* runScenario([
+        turnStarted(),
+        itemUpdated({
+          title: "Read file",
+          data: { toolCallId: "call-1", rawInput: { path: "AGENTS.md" } },
+        }),
+        itemCompleted({
+          title: "Read file",
+          data: {
+            toolCallId: "call-1",
+            rawInput: { path: "AGENTS.md" },
+            rawOutput: "# T3",
+          },
+        }),
+        turnCompleted("completed"),
+      ]);
+
+      const toolSpan = spans.find((span) => span.name === "execute_tool Read file");
+      assert.notEqual(toolSpan, undefined);
+      assert.equal(toolSpan?.attributes.get("gen_ai.tool.input"), '{"path":"AGENTS.md"}');
+      assert.equal(toolSpan?.attributes.get("gen_ai.tool.output"), '"# T3"');
+      assert.equal(spans.filter((span) => span.name.startsWith("execute_tool")).length, 1);
+    }),
+  );
+
+  it.effect("reads the OpenCode tool name and state as the tool input and output", () =>
+    Effect.gen(function* () {
+      const spans = yield* runScenario([
+        turnStarted(),
+        itemStarted({
+          data: {
+            tool: "bash",
+            state: { status: "running", input: { cmd: "ls" } },
+          },
+        }),
+        itemCompleted({
+          data: {
+            tool: "bash",
+            state: { status: "completed", input: { cmd: "ls" }, output: "a" },
+          },
+        }),
+        turnCompleted("completed"),
+      ]);
+
+      const toolSpan = spans.find((span) => span.name === "execute_tool bash");
+      assert.notEqual(toolSpan, undefined);
+      assert.equal(toolSpan?.attributes.get("gen_ai.tool.input"), '{"cmd":"ls"}');
+      assert.equal(toolSpan?.attributes.get("gen_ai.tool.output"), '"a"');
+    }),
+  );
+
   it.effect("nests a subagent invoke_agent span under the tool call that launched it", () =>
     Effect.gen(function* () {
       const spans = yield* runScenario([
