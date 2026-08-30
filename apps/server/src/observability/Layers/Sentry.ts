@@ -51,8 +51,24 @@ const captureFailedTurn = (span: Tracer.Span) => {
   return span;
 };
 
+// A continued trace freezes the baggage it is given as its dynamic sampling
+// context. With none, the segment ships an empty context and Relay keeps the
+// segment but discards every child span. Rebuild what the request trace carried.
+const continuedTraceBaggage = (traceId: string, sampled: boolean, environment: string) => {
+  const publicKey = Sentry.getClient()?.getDsn()?.publicKey;
+  return [
+    `sentry-trace_id=${traceId}`,
+    `sentry-sampled=${sampled}`,
+    `sentry-sample_rate=${sampled ? 1 : 0}`,
+    `sentry-environment=${environment}`,
+    ...(publicKey === undefined ? [] : [`sentry-public_key=${publicKey}`]),
+  ].join(",");
+};
+
 export const makeSentryTracer = Effect.fn("makeSentryTracer")(function* (
-  config: Pick<ServerConfig["Service"], "mode"> & { readonly sentryDsn: string },
+  config: Pick<ServerConfig["Service"], "mode"> & {
+    readonly sentryDsn: string;
+  },
 ): Effect.fn.Return<Tracer.Tracer, never, Scope.Scope> {
   Sentry.init({
     dsn: config.sentryDsn,
@@ -69,7 +85,10 @@ export const makeSentryTracer = Effect.fn("makeSentryTracer")(function* (
       if (parent.value._tag === "ExternalSpan") {
         const { traceId, spanId, sampled } = parent.value;
         return Sentry.continueTrace(
-          { sentryTrace: `${traceId}-${spanId}-${sampled ? "1" : "0"}`, baggage: undefined },
+          {
+            sentryTrace: `${traceId}-${spanId}-${sampled ? "1" : "0"}`,
+            baggage: continuedTraceBaggage(traceId, sampled, config.mode),
+          },
           open,
         );
       }

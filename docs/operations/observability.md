@@ -209,7 +209,10 @@ work that command's events wake up, and the provider turn that follows
 (`invoke_agent`) all land in one trace. The engine stamps the command span onto
 every event it persists, and the reactor and the turn tracer pick that stamp
 back up to continue the same trace, so a single Sentry trace shows the whole
-path from client request to agent response.
+path from client request to agent response. A continued trace is sent with a
+rebuilt dynamic sampling context (trace id, sample decision, environment, DSN
+key); without it Sentry keeps the `invoke_agent` span but drops its `chat` and
+`execute_tool` children.
 
 A turn that ends in failure is also reported as a Sentry issue
 (`AgentTurnFailed`, tagged with the thread and turn ids) linked to its trace.
