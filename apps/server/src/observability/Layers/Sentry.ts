@@ -30,10 +30,14 @@ import type { ServerConfig } from "../../config.ts";
 const captureFailedTurn = (span: Tracer.Span) => {
   const end = span.end.bind(span);
   span.end = (endTime, exit) => {
-    end(endTime, exit);
+    // The Sentry tracer files every failure exit as internal_error. A turn the
+    // user stopped is not an error; hand it a fail exit whose message Sentry
+    // renders as the cancelled span status instead.
+    const interrupted = Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause);
+    end(endTime, interrupted ? Exit.fail("cancelled") : exit);
     const attributes = span.attributes;
     if (attributes.get("sentry.op") !== "gen_ai.invoke_agent") return;
-    if (!Exit.isFailure(exit) || Cause.hasInterruptsOnly(exit.cause)) return;
+    if (interrupted || !Exit.isFailure(exit)) return;
     const error = new Error(String(Cause.squash(exit.cause)));
     error.name = "AgentTurnFailed";
     const capture = () =>

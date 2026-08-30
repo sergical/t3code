@@ -57,4 +57,40 @@ describe("makeSentryTracer", () => {
       assert.equal(dsc?.sampled, "true");
     }).pipe(Effect.scoped),
   );
+
+  it.live("a user-stopped turn ends cancelled, not internal_error", () =>
+    Effect.gen(function* () {
+      const tracer = yield* makeSentryTracer({
+        mode: "web",
+        sentryDsn: "https://publickey@o1.ingest.sentry.io/1",
+      });
+      const client = Sentry.getClient();
+      assert.notEqual(client, undefined);
+      if (client === undefined) return;
+      const statuses: Array<string | undefined> = [];
+      const captured = new Promise<Sentry.Event>((resolve) => {
+        client.getOptions().beforeSendTransaction = (event) => {
+          resolve(event);
+          return null;
+        };
+      });
+      client.getOptions().beforeSend = (event) => {
+        statuses.push(event.exception?.values?.[0]?.type);
+        return null;
+      };
+
+      yield* Effect.gen(function* () {
+        const turn = yield* Effect.makeSpan("invoke_agent claude", {
+          parent: Tracer.externalSpan({ traceId, spanId: requestSpanId, sampled: true }),
+          attributes: { "sentry.op": "gen_ai.invoke_agent" },
+        });
+        const now = yield* Clock.currentTimeNanos;
+        turn.end(now, Exit.interrupt());
+      }).pipe(Effect.withTracer(tracer));
+
+      const transaction = yield* Effect.promise(() => captured);
+      assert.equal(transaction.contexts?.trace?.status, "cancelled");
+      assert.deepEqual(statuses, []);
+    }).pipe(Effect.scoped),
+  );
 });
