@@ -1,5 +1,5 @@
 import { assert, describe, it } from "@effect/vitest";
-import { WS_METHODS } from "@t3tools/contracts";
+import { WS_METHODS, WsClientTraceMiddleware } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -9,11 +9,15 @@ import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import * as TestClock from "effect/testing/TestClock";
+import { Headers } from "effect/unstable/http";
 
 import {
+  clientTraceMiddlewareLayer,
+  externalSpanFromHeaders,
   observeRpcEffect,
   observeRpcStream,
   observeRpcStreamEffect,
+  RpcClientSpan,
 } from "./RpcInstrumentation.ts";
 
 const hasMetricSnapshot = (
@@ -309,6 +313,75 @@ describe("RpcInstrumentation", () => {
       );
 
       assert.deepStrictEqual(spanNames, []);
+    }),
+  );
+
+  it.effect("parses a valid sentry-trace header, honoring the sampled flag", () =>
+    Effect.gen(function* () {
+      const traceId = "a".repeat(32);
+      const spanId = "b".repeat(16);
+
+      const sampled = externalSpanFromHeaders({ "sentry-trace": `${traceId}-${spanId}-1` });
+      assert.equal(sampled?._tag, "ExternalSpan");
+      assert.equal(sampled?.traceId, traceId);
+      assert.equal(sampled?.spanId, spanId);
+      assert.equal(sampled?.sampled, true);
+
+      const unsampled = externalSpanFromHeaders({ "sentry-trace": `${traceId}-${spanId}-0` });
+      assert.equal(unsampled?.sampled, false);
+    }),
+  );
+
+  it.effect("returns undefined for a missing or malformed sentry-trace header", () =>
+    Effect.gen(function* () {
+      assert.equal(externalSpanFromHeaders({}), undefined);
+      assert.equal(externalSpanFromHeaders({ "sentry-trace": "garbage" }), undefined);
+    }),
+  );
+
+  it.effect("parents a traced RPC on the client's external span when one arrived", () =>
+    Effect.gen(function* () {
+      const parent = Tracer.externalSpan({
+        traceId: "a".repeat(32),
+        spanId: "b".repeat(16),
+        sampled: true,
+      });
+
+      const span = yield* observeRpcEffect("rpc.instrumentation.parented", Effect.currentSpan, {
+        "rpc.aggregate": "test",
+      }).pipe(Effect.provideService(RpcClientSpan, parent));
+
+      assert.equal(Option.isSome(span.parent), true);
+      const spanParent = span.parent as Option.Some<Tracer.AnySpan>;
+      assert.equal(spanParent.value._tag, "ExternalSpan");
+      assert.equal(spanParent.value.spanId, parent.spanId);
+      assert.equal(spanParent.value.traceId, parent.traceId);
+    }),
+  );
+
+  it.effect("wires the sentry-trace header from middleware options into RpcClientSpan", () =>
+    Effect.gen(function* () {
+      const middleware = yield* WsClientTraceMiddleware.pipe(
+        Effect.provide(clientTraceMiddlewareLayer),
+      );
+
+      const traceId = "a".repeat(32);
+      const spanId = "b".repeat(16);
+      // RpcMiddleware's `SuccessValue` is an opaque marker type effect-smol uses to
+      // erase the handler's success type across middleware; there is no real value
+      // of that type to hand over, so the inner effect and its result are cast
+      // locally rather than threading the marker through the test.
+      const seen = (yield* middleware(RpcClientSpan as never, {
+        headers: Headers.fromInput({ "sentry-trace": `${traceId}-${spanId}-1` }),
+        client: {} as never,
+        requestId: "1" as never,
+        rpc: {} as never,
+        payload: undefined,
+      })) as unknown as Tracer.ExternalSpan | undefined;
+
+      assert.equal(seen?._tag, "ExternalSpan");
+      assert.equal(seen?.traceId, traceId);
+      assert.equal(seen?.spanId, spanId);
     }),
   );
 

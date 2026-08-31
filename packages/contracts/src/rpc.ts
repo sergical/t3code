@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
+import * as RpcMiddleware from "effect/unstable/rpc/RpcMiddleware";
 
 import { ExternalLauncherError, LaunchEditorInput } from "./editor.ts";
 import {
@@ -1017,6 +1018,15 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
   stream: true,
 });
 
+/**
+ * Server-side hook for the trace headers a client attaches to each request.
+ * The server's implementation parents the request span on the client's trace;
+ * clients need no implementation (`requiredForClient` stays false).
+ */
+export class WsClientTraceMiddleware extends RpcMiddleware.Service<WsClientTraceMiddleware>()(
+  "@t3tools/contracts/rpc/WsClientTraceMiddleware",
+) {}
+
 export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
@@ -1120,4 +1130,4 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationGetArchivedShellSnapshotRpc,
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
-);
+).middleware(WsClientTraceMiddleware);

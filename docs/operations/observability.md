@@ -185,6 +185,12 @@ Sentry project. Pairing tokens are filtered out of every event the browser
 sends, because the pairing page keeps the token in the URL until it is used.
 Unset either variable and nothing changes.
 
+A browser trace continues into the server: the client sends its current
+sentry-trace context with every RPC request, and the server parents the
+matching `ws.rpc.*` span on it instead of starting a new root. Requests from
+clients built without a DSN carry no trace context, so each stays its own
+trace root as before.
+
 gen_ai spans (`gen_ai.invoke_agent` / `gen_ai.chat` / `gen_ai.execute_tool`)
 are provider-agnostic: one reactor watches the runtime event stream every
 adapter already emits, and every span carries `gen_ai.conversation.id` set to

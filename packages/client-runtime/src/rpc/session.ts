@@ -3,6 +3,7 @@ import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import type * as Scope from "effect/Scope";
 import * as RpcClient from "effect/unstable/rpc/RpcClient";
@@ -10,6 +11,7 @@ import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import * as Socket from "effect/unstable/socket/Socket";
 
 import { makeWsRpcProtocolClient, type WsRpcProtocolClient } from "./protocol.ts";
+import { RpcTraceHeaders } from "./traceHeaders.ts";
 import type {
   ConnectionAttemptError,
   ConnectionTransientError,
@@ -65,8 +67,32 @@ function mapSessionRpcError(error: InitialConfigError | ProbeError): ConnectionA
   }
 }
 
+type ProtocolService = RpcClient.Protocol["Service"];
+
+const withRequestTraceHeaders = (
+  protocol: ProtocolService,
+  traceHeaders: Option.Option<RpcTraceHeaders["Service"]>,
+): ProtocolService => {
+  if (Option.isNone(traceHeaders)) return protocol;
+  const provider = traceHeaders.value;
+  return {
+    ...protocol,
+    send: (clientId, request, transferables) => {
+      if (request._tag !== "Request") return protocol.send(clientId, request, transferables);
+      const headers = Object.entries(provider.current());
+      if (headers.length === 0) return protocol.send(clientId, request, transferables);
+      return protocol.send(
+        clientId,
+        { ...request, headers: [...request.headers, ...headers] },
+        transferables,
+      );
+    },
+  };
+};
+
 export const make = Effect.gen(function* () {
   const webSocketConstructor = yield* Socket.WebSocketConstructor;
+  const traceHeaders = yield* Effect.serviceOption(RpcTraceHeaders);
 
   const connect = Effect.fnUntraced(function* (connection: PreparedConnection) {
     yield* Effect.annotateCurrentSpan({
@@ -100,7 +126,7 @@ export const make = Effect.gen(function* () {
       RpcClient.makeProtocolSocket({
         retryTransientErrors: false,
         retryPolicy: Schedule.recurs(0),
-      }),
+      }).pipe(Effect.map((protocol) => withRequestTraceHeaders(protocol, traceHeaders))),
     ).pipe(
       Layer.provide(
         Layer.mergeAll(

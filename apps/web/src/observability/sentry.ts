@@ -51,3 +51,16 @@ export const sentryRootOptions: RootOptions = {
   onCaughtError: onReactError,
   onRecoverableError: onReactError,
 };
+
+/**
+ * Trace headers for outgoing RPC requests. Empty until initSentry has run, so
+ * requests from builds without a DSN go out unchanged.
+ */
+export const rpcTraceHeaders = (): Readonly<Record<string, string>> => {
+  if (Sentry.getClient() === undefined) return {};
+  const { "sentry-trace": sentryTrace, baggage } = Sentry.getTraceData();
+  if (sentryTrace === undefined) return {};
+  return baggage === undefined
+    ? { "sentry-trace": sentryTrace }
+    : { "sentry-trace": sentryTrace, baggage };
+};
