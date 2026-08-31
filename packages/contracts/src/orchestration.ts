@@ -1401,6 +1401,14 @@ export const OrchestrationClientOrigin = Schema.Struct({
 });
 export type OrchestrationClientOrigin = typeof OrchestrationClientOrigin.Type;
 
+/** Trace of the command that produced an event, so reactors and provider spans can continue it. */
+export const OrchestrationTraceContext = Schema.Struct({
+  traceId: TrimmedNonEmptyString,
+  spanId: TrimmedNonEmptyString,
+  sampled: Schema.Boolean,
+});
+export type OrchestrationTraceContext = typeof OrchestrationTraceContext.Type;
+
 export const OrchestrationEventMetadata = Schema.Struct({
   providerTurnId: Schema.optional(TrimmedNonEmptyString),
   providerItemId: Schema.optional(ProviderItemId),
@@ -1408,6 +1416,7 @@ export const OrchestrationEventMetadata = Schema.Struct({
   requestId: Schema.optional(ApprovalRequestId),
   ingestedAt: Schema.optional(IsoDateTime),
   origin: Schema.optional(OrchestrationClientOrigin),
+  trace: Schema.optional(OrchestrationTraceContext),
 });
 export type OrchestrationEventMetadata = typeof OrchestrationEventMetadata.Type;
 

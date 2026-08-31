@@ -3,7 +3,7 @@ import type * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Socket from "effect/unstable/socket/Socket";
 
-import { remoteHttpClientLayer } from "@t3tools/client-runtime/rpc";
+import { remoteHttpClientLayer, RpcTraceHeaders } from "@t3tools/client-runtime/rpc";
 import { makeRelayClientTracingLayer } from "@t3tools/shared/relayTracing";
 import * as PrimaryEnvironmentHttpClient from "../environments/primary/httpClient";
 import { primaryEnvironmentHttpLayer } from "../environments/primary/httpLayer";
@@ -11,6 +11,7 @@ import { primaryEnvironmentHttpLayer } from "../environments/primary/httpLayer";
 import { browserCryptoLayer } from "../cloud/dpop";
 import { managedRelayClientLayer } from "../cloud/managedRelayLayer";
 import { resolveCloudPublicConfig, resolveRelayTracingConfig } from "../cloud/publicConfig";
+import { rpcTraceHeaders } from "../observability/sentry";
 
 function configuredRelayUrl(): string {
   return resolveCloudPublicConfig().relayUrl ?? "http://relay.invalid";
@@ -24,11 +25,17 @@ const relayTracingLayer = makeRelayClientTracingLayer(resolveRelayTracingConfig(
   client: typeof window !== "undefined" && window.desktopBridge ? "desktop" : "web",
 }).pipe(Layer.provide(httpClientLayer));
 
+const rpcTraceHeadersLayer = Layer.succeed(
+  RpcTraceHeaders,
+  RpcTraceHeaders.of({ current: rpcTraceHeaders }),
+);
+
 type RuntimeLayerSource =
   | typeof httpClientLayer
   | typeof browserCryptoLayer
   | typeof Socket.layerWebSocketConstructorGlobal
   | typeof relayTracingLayer
+  | typeof rpcTraceHeadersLayer
   | ReturnType<typeof managedRelayClientLayer>;
 
 export const remoteHttpRuntime = ManagedRuntime.make(httpClientLayer);
@@ -59,6 +66,7 @@ const runtimeLayer = Layer.mergeAll(
   browserCryptoLayer,
   Socket.layerWebSocketConstructorGlobal,
   relayTracingLayer,
+  rpcTraceHeadersLayer,
   managedRelayClientLayer(configuredRelayUrl()).pipe(
     Layer.provide(Layer.mergeAll(httpClientLayer, browserCryptoLayer)),
   ),

@@ -448,6 +448,7 @@ const buildAppUnderTest = (options?: {
       otlpMetricsUrl: undefined,
       otlpExportIntervalMs: 10_000,
       otlpServiceName: "t3-server",
+      traceGenAiContent: false,
       mode: "desktop",
       port: 0,
       host: "127.0.0.1",

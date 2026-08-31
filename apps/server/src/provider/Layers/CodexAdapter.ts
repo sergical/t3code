@@ -15,6 +15,7 @@ import {
   type ProviderEvent,
   ProviderInstanceId,
   type ProviderRuntimeEvent,
+  type TurnStartedPayload,
   type ProviderRequestKind,
   type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
@@ -661,7 +662,11 @@ function mapCollabAgentEvent(
           {
             ...base,
             type: "task.updated",
-            payload: { taskId, status: waiting ? "waiting" : "running", ...linkage },
+            payload: {
+              taskId,
+              status: waiting ? "waiting" : "running",
+              ...linkage,
+            },
           },
         ];
       }
@@ -1662,6 +1667,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
+  // Codex's turn/started notification carries no model, so remember the
+  // selection from sendTurn and stamp it on the runtime turn.started event.
+  const turnModels = new Map<ThreadId, TurnStartedPayload>();
 
   const startSession: CodexAdapterShape["startSession"] = (input) =>
     Effect.scoped(
@@ -1743,7 +1751,17 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         const eventFiber = yield* Stream.runForEach(runtime.events, (event) =>
           Effect.gen(function* () {
             yield* writeNativeEvent(event);
-            const runtimeEvents = mapToRuntimeEvents(event, event.threadId);
+            const runtimeEvents = mapToRuntimeEvents(event, event.threadId).map((runtimeEvent) =>
+              runtimeEvent.type === "turn.started"
+                ? {
+                    ...runtimeEvent,
+                    payload: {
+                      ...turnModels.get(event.threadId),
+                      ...runtimeEvent.payload,
+                    },
+                  }
+                : runtimeEvent,
+            );
             if (runtimeEvents.length === 0) {
               yield* Effect.logDebug("ignoring unhandled Codex provider event", {
                 method: event.method,
@@ -1836,6 +1854,12 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       input.modelSelection?.instanceId === boundInstanceId
         ? getModelSelectionStringOptionValue(input.modelSelection, "reasoningEffort")
         : undefined;
+    turnModels.set(input.threadId, {
+      ...(input.modelSelection?.instanceId === boundInstanceId
+        ? { model: input.modelSelection.model }
+        : {}),
+      ...(reasoningEffort ? { effort: reasoningEffort } : {}),
+    });
     const serviceTier =
       input.modelSelection?.instanceId === boundInstanceId
         ? getCodexServiceTierOptionValue(input.modelSelection)
@@ -1968,6 +1992,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     }
     session.stopped = true;
     sessions.delete(session.threadId);
+    turnModels.delete(session.threadId);
     yield* session.runtime.close.pipe(Effect.ignore);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
     yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);

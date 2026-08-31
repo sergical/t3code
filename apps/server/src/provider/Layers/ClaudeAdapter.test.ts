@@ -2049,6 +2049,173 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("un-streamed assistant snapshots start tool items and report usage once", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const relevantEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "item.started" ||
+            event.type === "thread.token-usage.updated" ||
+            event.type === "task.started" ||
+            event.type === "item.completed" ||
+            event.type === "turn.completed",
+        ),
+        Stream.takeUntil((event) => event.type === "turn.completed"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "spawn an agent",
+        attachments: [],
+      });
+
+      const usage = {
+        input_tokens: 2,
+        output_tokens: 1754,
+        cache_creation_input_tokens: 30037,
+        cache_read_input_tokens: 0,
+      };
+
+      // Delivered as a single complete snapshot: no stream_event frames at
+      // all, as happened live while a foreground Agent ran.
+      harness.query.emit({
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: {
+          id: "msg_snapshot",
+          model: "claude-fable-5",
+          role: "assistant",
+          stop_reason: "tool_use",
+          content: [
+            { type: "text", text: "Looking." },
+            {
+              type: "tool_use",
+              id: "toolu_agent_snap",
+              name: "Agent",
+              input: {
+                description: "Map the repo",
+                prompt: "Find the tracer",
+                subagent_type: "Explore",
+              },
+            },
+          ],
+          usage,
+        },
+        uuid: "assistant-snapshot-uuid",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-snap",
+        description: "Map the repo",
+        task_type: "local_agent",
+        tool_use_id: "toolu_agent_snap",
+        uuid: "task-snap-uuid",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "user",
+        session_id: "sdk-session",
+        uuid: "user-tool-result",
+        parent_tool_use_id: null,
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "toolu_agent_snap",
+              content: "Explored the repo.",
+            },
+          ],
+        },
+      } as unknown as SDKMessage);
+
+      // A later parent message DOES stream: its message_start must mark it so
+      // its own snapshot does not re-report usage already reported live.
+      harness.query.emit({
+        type: "stream_event",
+        session_id: "sdk-session",
+        uuid: "stream-message-start",
+        parent_tool_use_id: null,
+        event: {
+          type: "message_start",
+          message: { id: "msg_streamed" },
+        },
+      } as unknown as SDKMessage);
+
+      harness.query.emit({
+        type: "assistant",
+        parent_tool_use_id: null,
+        message: {
+          id: "msg_streamed",
+          model: "claude-fable-5",
+          role: "assistant",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: "Done." }],
+          usage,
+        },
+        uuid: "assistant-streamed-uuid",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        errors: [],
+        session_id: "sdk-session",
+        uuid: "result-snap",
+      } as unknown as SDKMessage);
+
+      const relevantEvents = Array.from(yield* Fiber.join(relevantEventsFiber));
+      // Usage rows are labelled by source so a re-report from the streamed
+      // snapshot would show up as a second "claude/assistant" row.
+      const label = (event: ProviderRuntimeEvent) =>
+        event.type === "thread.token-usage.updated"
+          ? (event.raw?.method ?? "")
+          : "itemId" in event && String(event.itemId) === "toolu_agent_snap"
+            ? "tool"
+            : "";
+      assert.deepEqual(
+        relevantEvents.map((event) => [event.type, label(event)]),
+        [
+          ["item.completed", ""],
+          ["item.started", "tool"],
+          ["thread.token-usage.updated", "claude/assistant"],
+          ["task.started", ""],
+          ["item.completed", "tool"],
+          ["thread.token-usage.updated", "claude/result"],
+          ["turn.completed", ""],
+        ],
+      );
+      const toolStarted = relevantEvents[1];
+      if (toolStarted?.type === "item.started") {
+        assert.equal(toolStarted.payload.itemType, "collab_agent_tool_call");
+        assert.equal(toolStarted.payload.title, "Subagent task");
+        assert.equal(toolStarted.payload.detail, "Map the repo");
+      }
+      const toolCompleted = relevantEvents[4];
+      if (toolCompleted?.type === "item.completed") {
+        assert.equal(toolCompleted.payload.status, "completed");
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("a subagent snapshot that beats task_started still wins over the seed", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -2923,7 +3090,7 @@ describe("ClaudeAdapterLive", () => {
       return Effect.gen(function* () {
         const adapter = yield* ClaudeAdapter;
 
-        const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 8).pipe(
+        const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 10).pipe(
           Stream.runCollect,
           Effect.forkChild,
         );
@@ -2940,6 +3107,10 @@ describe("ClaudeAdapterLive", () => {
           attachments: [],
         });
 
+        // The tool_use block in this early echo never gets its own
+        // content_block_start (no stream frames follow for it): the same
+        // un-streamed-snapshot backfill that starts items for whole
+        // stream-less responses also starts this one from the snapshot.
         harness.query.emit({
           type: "assistant",
           session_id: "sdk-session-early-assistant",
@@ -2986,7 +3157,11 @@ describe("ClaudeAdapterLive", () => {
             "session.state.changed",
             "turn.started",
             "thread.started",
+            "item.started",
             "content.delta",
+            "item.completed",
+            // The tool item started from the assistant echo never gets a
+            // tool_result, so turn completion force-completes it.
             "item.completed",
             "turn.completed",
           ],

@@ -17,11 +17,13 @@ import {
 } from "./lib/windowControlsOverlay";
 import { AppRoot } from "./AppRoot";
 import { clerkAppearance } from "./components/clerk/clerkAppearance";
+import { initSentry, sentryRootOptions } from "./observability/sentry";
 
 // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
 const history = isElectron ? createHashHistory() : createBrowserHistory();
 
 const router = getRouter(history);
+initSentry(router);
 
 if (isElectron) {
   syncDocumentElectronPlatformClasses(navigator.platform);
@@ -32,7 +34,7 @@ const clerkPublishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY as string
 
 const app = <AppRoot router={router} />;
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+ReactDOM.createRoot(document.getElementById("root") as HTMLElement, sentryRootOptions).render(
   <React.StrictMode>
     {clerkPublishableKey && hasCloudPublicConfig() ? (
       isElectron ? (
