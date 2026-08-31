@@ -9,20 +9,6 @@ import * as Tracer from "effect/Tracer";
 import type { ServerConfig } from "../../config.ts";
 
 /**
- * Initializes the Sentry SDK and returns an Effect tracer that forwards every
- * span to it. Used as the delegate of the local file tracer so existing
- * `Effect.withSpan` call sites need no changes. Flushes pending events when
- * the owning scope closes.
- *
- * Every parentless span starts a new Sentry trace. Without this, a long-lived
- * Node process reuses one propagation context and every request and agent turn
- * lands in a single trace for the lifetime of the server.
- *
- * A span whose parent is an external span (a persisted event's trace, or a
- * client's sentry-trace header) is opened through `continueTrace`, so reactor
- * work and agent turns land in the trace of the request that caused them.
- */
-/**
  * Reports an agent turn that ends in failure as a Sentry issue. Interrupted
  * turns (user stop, cancel) are not failures. The issue is captured with the
  * turn's span active so Sentry links it to the trace.
@@ -75,6 +61,20 @@ const continuedTraceBaggage = (traceId: string, sampled: boolean, environment: s
 const defaultOp = (name: string) =>
   name.startsWith("sql.") ? "db" : name.startsWith("ws.rpc.") ? "rpc" : "function";
 
+/**
+ * Initializes the Sentry SDK and returns an Effect tracer that forwards every
+ * span to it. Used as the delegate of the local file tracer so existing
+ * `Effect.withSpan` call sites need no changes. Flushes pending events when
+ * the owning scope closes.
+ *
+ * Every parentless span starts a new Sentry trace. Without this, a long-lived
+ * Node process reuses one propagation context and every request and agent turn
+ * lands in a single trace for the lifetime of the server.
+ *
+ * A span whose parent is an external span (a persisted event's trace, or a
+ * client's sentry-trace header) is opened through `continueTrace`, so reactor
+ * work and agent turns land in the trace of the request that caused them.
+ */
 export const makeSentryTracer = Effect.fn("makeSentryTracer")(function* (
   config: Pick<ServerConfig["Service"], "mode"> & {
     readonly sentryDsn: string;
