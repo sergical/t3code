@@ -51,6 +51,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     otlpExportIntervalMs: 10_000,
     otlpServiceName: "t3-server",
     sentryDsn: undefined,
+    traceGenAiContent: false,
     devAllowedOrigins: [],
   } as const;
 
@@ -190,6 +191,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         logLevel: "Debug",
         ...defaultObservabilityConfig,
         sentryDsn: "https://key@example.ingest.sentry.io/1",
+        traceGenAiContent: true,
         mode: "web",
         port: 8788,
         cwd: process.cwd(),
