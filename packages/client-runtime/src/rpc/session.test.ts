@@ -19,6 +19,7 @@ import {
   type PreparedConnection,
 } from "../connection/model.ts";
 import * as RpcSession from "./session.ts";
+import { RpcTraceHeaders } from "./traceHeaders.ts";
 
 type SocketEventType = "open" | "message" | "close" | "error";
 type SocketEvent = {
@@ -153,14 +154,18 @@ const LEGACY_SERVER_CONFIG = {
   },
 };
 
-const makeFactory = Effect.fn("TestRpcSessionFactory.make")(function* () {
+const makeFactory = Effect.fn("TestRpcSessionFactory.make")(function* (
+  extraLayer?: Layer.Layer<RpcTraceHeaders>,
+) {
   const sockets: TestWebSocket[] = [];
   const constructorLayer = Layer.succeed(Socket.WebSocketConstructor, (url) => {
     const socket = new TestWebSocket(url);
     sockets.push(socket);
     return socket as unknown as globalThis.WebSocket;
   });
-  const layer = RpcSession.layer.pipe(Layer.provide(constructorLayer));
+  const layer = RpcSession.layer.pipe(
+    Layer.provide(extraLayer ? Layer.mergeAll(constructorLayer, extraLayer) : constructorLayer),
+  );
   const factory = yield* RpcSession.RpcSessionFactory.pipe(Effect.provide(layer));
   return { factory, sockets };
 });
@@ -385,6 +390,29 @@ describe("RpcSessionFactory", () => {
         ]);
       }),
     ),
+  );
+
+  it.effect("attaches provided trace headers to outgoing requests", () =>
+    Effect.gen(function* () {
+      const traceHeadersLayer = Layer.succeed(
+        RpcTraceHeaders,
+        RpcTraceHeaders.of({
+          current: () => ({ "sentry-trace": `${"a".repeat(32)}-${"b".repeat(16)}-1` }),
+        }),
+      );
+      const { factory, sockets } = yield* makeFactory(traceHeadersLayer);
+      const session = yield* factory.connect(PREPARED);
+      yield* Effect.forkChild(session.ready);
+      const socket = yield* awaitSocket(sockets);
+      socket.open();
+      yield* awaitRequest(socket);
+
+      const frame = decodeJson(socket.sent[0]) as { headers: ReadonlyArray<[string, string]> };
+      expect(frame.headers).toContainEqual([
+        "sentry-trace",
+        `${"a".repeat(32)}-${"b".repeat(16)}-1`,
+      ]);
+    }),
   );
 
   it.effect("fails readiness when the websocket never opens", () =>

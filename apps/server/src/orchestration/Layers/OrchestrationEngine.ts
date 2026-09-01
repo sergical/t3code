@@ -22,6 +22,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import type * as Tracer from "effect/Tracer";
 
 import {
   metricAttributes,
@@ -56,6 +57,7 @@ const isOrchestrationCommandInvariantError = Schema.is(OrchestrationCommandInvar
 interface CommandEnvelope {
   command: OrchestrationCommand;
   origin: OrchestrationClientOrigin | undefined;
+  parentSpan: Tracer.AnySpan | undefined;
   result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
   startedAtMs: number;
 }
@@ -185,15 +187,26 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           ),
         );
         const plannedEvents = Array.isArray(eventBase) ? eventBase : [eventBase];
-        // Stamp the dispatching client's origin onto every event the command
-        // produced. The decider stays pure; attribution is an engine concern.
-        const eventBases =
-          envelope.origin === undefined
-            ? plannedEvents
-            : plannedEvents.map((planned) => ({
-                ...planned,
-                metadata: { ...planned.metadata, origin: envelope.origin },
-              }));
+        // Stamp the dispatching client's origin and the command span's trace
+        // onto every event the command produced. The decider stays pure;
+        // attribution is an engine concern.
+        const span = yield* Effect.option(Effect.currentSpan);
+        const eventBases = plannedEvents.map((planned) => ({
+          ...planned,
+          metadata: {
+            ...planned.metadata,
+            ...(envelope.origin === undefined ? {} : { origin: envelope.origin }),
+            ...(Option.isSome(span)
+              ? {
+                  trace: {
+                    traceId: span.value.traceId,
+                    spanId: span.value.spanId,
+                    sampled: span.value.sampled,
+                  },
+                }
+              : {}),
+          },
+        }));
         const committedCommand = yield* sql
           .withTransaction(
             Effect.gen(function* () {
@@ -257,7 +270,11 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           }
         }
         return { sequence: committedCommand.lastSequence };
-      }).pipe(Effect.withSpan(`orchestration.command.${envelope.command.type}`)),
+      }).pipe(
+        Effect.withSpan(`orchestration.command.${envelope.command.type}`, {
+          parent: envelope.parentSpan,
+        }),
+      ),
     ).pipe(
       Effect.flatMap((exit) =>
         Effect.gen(function* () {
@@ -346,6 +363,7 @@ const makeOrchestrationEngine = Effect.gen(function* () {
       yield* Queue.offer(commandQueue, {
         command,
         origin: options?.origin,
+        parentSpan: Option.getOrUndefined(yield* Effect.option(Effect.currentParentSpan)),
         result,
         startedAtMs: yield* Clock.currentTimeMillis,
       });

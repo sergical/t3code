@@ -1430,4 +1430,40 @@ describe("OrchestrationEngine", () => {
 
     await system.dispose();
   });
+
+  it("stamps the dispatching request's trace onto persisted event metadata", async () => {
+    const createdAt = now();
+    const system = await createOrchestrationSystem();
+    const { engine } = system;
+
+    const request = await system.run(
+      Effect.gen(function* () {
+        const request = yield* Effect.currentSpan;
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("cmd-trace-project-create"),
+          projectId: asProjectId("project-trace"),
+          title: "Trace Project",
+          workspaceRoot: "/tmp/project-trace",
+          defaultModelSelection: {
+            instanceId: ProviderInstanceId.make("codex"),
+            model: "gpt-5-codex",
+          },
+          createdAt,
+        });
+        return request;
+      }).pipe(Effect.withSpan("ws.request")),
+    );
+
+    const events = await system.run(
+      Stream.runCollect(engine.readEvents(0)).pipe(Effect.map((chunk) => Array.from(chunk))),
+    );
+    const event = events.find((event) => event.commandId === "cmd-trace-project-create");
+
+    expect(event?.metadata.trace?.traceId).toBe(request.traceId);
+    expect(typeof event?.metadata.trace?.spanId).toBe("string");
+    expect(event?.metadata.trace?.spanId).not.toBe(request.spanId);
+
+    await system.dispose();
+  });
 });

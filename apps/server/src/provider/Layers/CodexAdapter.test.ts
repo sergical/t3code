@@ -410,7 +410,9 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     const layer = Layer.effect(
       CodexAdapter,
       Effect.gen(function* () {
-        const codexConfig = decodeCodexSettings({ launchArgs: "--strict-config --enable foo" });
+        const codexConfig = decodeCodexSettings({
+          launchArgs: "--strict-config --enable foo",
+        });
         return yield* makeCodexAdapter(codexConfig, {
           makeRuntime: runtimeFactory.factory,
         });
@@ -441,9 +443,13 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     const layer = Layer.effect(
       CodexAdapter,
       Effect.gen(function* () {
-        const codexConfig = decodeCodexSettings({ launchArgs: "--enable settings-feature" });
+        const codexConfig = decodeCodexSettings({
+          launchArgs: "--enable settings-feature",
+        });
         return yield* makeCodexAdapter(codexConfig, {
-          environment: { T3CODE_CODEX_LAUNCH_ARGS: " --strict-config --enable env-feature " },
+          environment: {
+            T3CODE_CODEX_LAUNCH_ARGS: " --strict-config --enable env-feature ",
+          },
           makeRuntime: runtimeFactory.factory,
         });
       }),
@@ -1409,6 +1415,55 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
       }),
   );
 
+  it.effect("stamps the selected model and effort on turn.started", () =>
+    Effect.gen(function* () {
+      const { adapter, runtime } = yield* startLifecycleRuntime();
+      yield* adapter.sendTurn({
+        threadId: asThreadId("thread-1"),
+        input: "hello",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex", [
+          { id: "reasoningEffort", value: "high" },
+        ]),
+        attachments: [],
+      });
+      const firstEventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      yield* runtime.emit({
+        id: asEventId("evt-codex-turn-started"),
+        kind: "notification",
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("turn-1"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        method: "turn/started",
+        payload: {
+          threadId: "thread-1",
+          turn: {
+            id: "turn-1",
+            items: [],
+            itemsView: "notLoaded",
+            status: "inProgress",
+            error: null,
+            startedAt: 0,
+            completedAt: null,
+            durationMs: null,
+          },
+        },
+      } satisfies ProviderEvent);
+
+      const firstEvent = yield* Fiber.join(firstEventFiber);
+      NodeAssert.equal(firstEvent._tag, "Some");
+      if (firstEvent._tag !== "Some") {
+        return;
+      }
+      NodeAssert.equal(firstEvent.value.type, "turn.started");
+      NodeAssert.deepEqual(firstEvent.value.payload, {
+        model: "gpt-5.3-codex",
+        effort: "high",
+      });
+    }),
+  );
+
   it.effect("unwraps Codex token usage payloads for context window events", () =>
     Effect.gen(function* () {
       const { adapter, runtime } = yield* startLifecycleRuntime();
@@ -1575,7 +1630,9 @@ scopedLifecycleLayer("CodexAdapterLive scoped lifecycle", (it) => {
   );
 });
 
-const scopedFailureRuntimeFactory = makeScopedRuntimeFactory({ failConstruction: true });
+const scopedFailureRuntimeFactory = makeScopedRuntimeFactory({
+  failConstruction: true,
+});
 const scopedFailureLayer = it.layer(
   Layer.effect(
     CodexAdapter,

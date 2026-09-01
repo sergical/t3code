@@ -320,7 +320,10 @@ function mcpElicitationFormFields(payload: EffectCodexSchema.McpServerElicitatio
 
 function mcpElicitationFieldOptions(field: typeof McpElicitationFormField.Type) {
   if (field.oneOf) {
-    return field.oneOf.map((option) => ({ value: option.const, label: option.title }));
+    return field.oneOf.map((option) => ({
+      value: option.const,
+      label: option.title,
+    }));
   }
   return (field.enum ?? []).map((value, index) => ({
     value,
@@ -343,7 +346,10 @@ function isMcpElicitationPersistenceField(
 /** Returns the app and approval choices advertised by an MCP elicitation. */
 export function describeMcpElicitation(
   payload: EffectCodexSchema.McpServerElicitationRequestParams,
-): { readonly appName: string; readonly options: ReadonlyArray<ProviderApprovalOption> } {
+): {
+  readonly appName: string;
+  readonly options: ReadonlyArray<ProviderApprovalOption>;
+} {
   const metadata = isMcpElicitationMetadata(payload._meta) ? payload._meta : undefined;
   const appName =
     metadata?.app_name ??
@@ -820,7 +826,7 @@ export function makeMemoryConsolidationNotificationFilter(): (
   };
 }
 
-function readRouteFields(notification: CodexServerNotification): {
+export function readRouteFields(notification: CodexServerNotification): {
   readonly turnId: TurnId | undefined;
   readonly itemId: ProviderItemId | undefined;
 } {
@@ -843,6 +849,7 @@ function readRouteFields(notification: CodexServerNotification): {
       };
     case "turn/diff/updated":
     case "turn/plan/updated":
+    case "thread/tokenUsage/updated":
       return {
         turnId: TurnId.make(notification.params.turnId),
         itemId: undefined,
@@ -1355,7 +1362,10 @@ export const makeCodexSessionRuntime = (
       // The child is already loaded. This rejoins it without starting a turn,
       // and excludeTurns avoids loading or replaying its history.
       yield* client.raw
-        .request("thread/resume", { threadId: agentThreadId, excludeTurns: true })
+        .request("thread/resume", {
+          threadId: agentThreadId,
+          excludeTurns: true,
+        })
         .pipe(
           Effect.flatMap(decodeCodexChildResumeMetadata),
           Effect.timeout("5 seconds"),
@@ -1530,7 +1540,10 @@ export const makeCodexSessionRuntime = (
             payload: {
               ...(registeredChild
                 ? collabChildIdentity(registeredChild, metadata)
-                : { agentThreadId: item.agentThreadId, agentPath: item.agentPath }),
+                : {
+                    agentThreadId: item.agentThreadId,
+                    agentPath: item.agentPath,
+                  }),
               activityKind: item.kind,
             },
           });
@@ -2282,7 +2295,9 @@ export const makeCodexSessionRuntime = (
       });
       yield* emitSessionEvent("session/closed", "Session stopped").pipe(
         Effect.catch((cause) =>
-          Effect.logError("Failed to emit Codex session closed event.", { cause }),
+          Effect.logError("Failed to emit Codex session closed event.", {
+            cause,
+          }),
         ),
       );
       yield* Scope.close(runtimeScope, Exit.void);

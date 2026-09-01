@@ -1,11 +1,14 @@
-import { WS_METHODS } from "@t3tools/contracts";
+import { WS_METHODS, WsClientTraceMiddleware } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
+import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
 import * as Metric from "effect/Metric";
 import * as References from "effect/References";
 import * as Stream from "effect/Stream";
+import * as Tracer from "effect/Tracer";
 
 import { outcomeFromExit } from "./Attributes.ts";
 import { metricAttributes, rpcRequestDuration, rpcRequestsTotal, withMetrics } from "./Metrics.ts";
@@ -35,16 +38,66 @@ const rpcSpanAttributes = (
   ...traceAttributes,
 });
 
+const rpcSpanOptions = (
+  method: string,
+  parent: Tracer.ExternalSpan | undefined,
+  traceAttributes?: Readonly<Record<string, unknown>>,
+) => ({
+  ...(parent === undefined ? { root: true } : { parent }),
+  attributes: rpcSpanAttributes(method, traceAttributes),
+});
+
+/**
+ * The trace context a client sent with the request, decoded from its
+ * sentry-trace header. Absent for clients that do not run a tracing SDK.
+ */
+export const RpcClientSpan = Context.Reference<Tracer.ExternalSpan | undefined>(
+  "apps/server/observability/RpcClientSpan",
+  { defaultValue: () => undefined },
+);
+
+const SENTRY_TRACE_PATTERN = /^([0-9a-f]{32})-([0-9a-f]{16})(?:-([01]))?$/;
+
+export const externalSpanFromHeaders = (
+  headers: Readonly<Record<string, string | undefined>>,
+): Tracer.ExternalSpan | undefined => {
+  const match = headers["sentry-trace"]?.match(SENTRY_TRACE_PATTERN);
+  if (match === null || match === undefined) return undefined;
+  return Tracer.externalSpan({
+    traceId: match[1]!,
+    spanId: match[2]!,
+    sampled: match[3] !== "0",
+  });
+};
+
+export const clientTraceMiddlewareLayer = Layer.succeed(
+  WsClientTraceMiddleware,
+  WsClientTraceMiddleware.of((effect, { headers }) => {
+    const parent = externalSpanFromHeaders(headers);
+    return parent === undefined ? effect : Effect.provideService(effect, RpcClientSpan, parent);
+  }),
+);
+
+// A request from a traced client joins that client's trace; its sentry-trace
+// header arrives through the group middleware as RpcClientSpan. Every other
+// request is its own trace root: the WebSocket connection span above it lives
+// as long as the socket, and exporters that ship a tree only when its root
+// ends would never send a request that stays parented on it.
 const withRpcEffectTracing = <A, E, R>(
   method: string,
   effect: Effect.Effect<A, E, R>,
   traceAttributes?: Readonly<Record<string, unknown>>,
 ): Effect.Effect<A, E, R> =>
   shouldTraceRpc(method)
-    ? effect.pipe(
-        Effect.withSpan(`${RPC_SPAN_PREFIX}.${method}`, {
-          attributes: rpcSpanAttributes(method, traceAttributes),
-        }),
+    ? RpcClientSpan.pipe(
+        Effect.flatMap((parent) =>
+          effect.pipe(
+            Effect.withSpan(
+              `${RPC_SPAN_PREFIX}.${method}`,
+              rpcSpanOptions(method, parent, traceAttributes),
+            ),
+          ),
+        ),
       )
     : effect.pipe(Effect.provideService(References.TracerEnabled, false));
 
@@ -54,10 +107,15 @@ const withRpcStreamTracing = <A, E, R>(
   traceAttributes?: Readonly<Record<string, unknown>>,
 ): Stream.Stream<A, E, R> =>
   shouldTraceRpc(method)
-    ? stream.pipe(
-        Stream.withSpan(`${RPC_SPAN_PREFIX}.${method}`, {
-          attributes: rpcSpanAttributes(method, traceAttributes),
-        }),
+    ? Stream.unwrap(
+        Effect.map(RpcClientSpan, (parent) =>
+          stream.pipe(
+            Stream.withSpan(
+              `${RPC_SPAN_PREFIX}.${method}`,
+              rpcSpanOptions(method, parent, traceAttributes),
+            ),
+          ),
+        ),
       )
     : stream.pipe(Stream.provideService(References.TracerEnabled, false));
 

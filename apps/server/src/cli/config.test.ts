@@ -50,6 +50,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     otlpMetricsUrl: undefined,
     otlpExportIntervalMs: 10_000,
     otlpServiceName: "t3-server",
+    sentryDsn: undefined,
+    traceGenAiContent: false,
     devAllowedOrigins: [],
   } as const;
 
@@ -176,6 +178,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
                   T3CODE_NO_BROWSER: "false",
                   T3CODE_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "false",
                   T3CODE_LOG_WS_EVENTS: "false",
+                  SENTRY_DSN: "https://key@example.ingest.sentry.io/1",
                 },
               }),
             ),
@@ -187,6 +190,8 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       expect(resolved).toEqual({
         logLevel: "Debug",
         ...defaultObservabilityConfig,
+        sentryDsn: "https://key@example.ingest.sentry.io/1",
+        traceGenAiContent: true,
         mode: "web",
         port: 8788,
         cwd: process.cwd(),
@@ -204,6 +209,7 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         tailscaleServePort: 8443,
       });
       assert.equal(resolved.dbPath, join(baseDir, "userdata", "state.sqlite"));
+      assert.equal(resolved.sentryDsn, "https://key@example.ingest.sentry.io/1");
     }),
   );
 

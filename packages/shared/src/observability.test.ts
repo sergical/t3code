@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
+import * as Option from "effect/Option";
 import * as Order from "effect/Order";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
@@ -454,6 +455,56 @@ describe("observability", () => {
           assert.equal(records.length, 1);
           assert.equal(records[0]?.name, "interrupt-span");
           assert.equal(records[0]?.exit?._tag, "Interrupted");
+        }),
+      ),
+    );
+
+    it.effect("hands the delegate its own span as parent, not the local file wrapper", () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const tempDir = yield* fileSystem.makeTempDirectoryScoped({
+            prefix: "t3-local-tracer-delegate-",
+          });
+          const tracePath = path.join(tempDir, "shared.trace.ndjson");
+
+          const capturedParents: Array<Tracer.AnySpan | undefined> = [];
+          const delegateSpans: Array<Tracer.Span> = [];
+          const delegate = Tracer.make({
+            span: (spanOptions) => {
+              capturedParents.push(Option.getOrUndefined(spanOptions.parent));
+              const span = new Tracer.NativeSpan(spanOptions);
+              delegateSpans.push(span);
+              return span;
+            },
+          });
+
+          const program = Effect.gen(function* () {
+            yield* Effect.void.pipe(Effect.withSpan("child-span"));
+          }).pipe(Effect.withSpan("parent-span"));
+
+          yield* program.pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                Layer.effect(
+                  Tracer.Tracer,
+                  makeLocalFileTracer({
+                    filePath: tracePath,
+                    maxBytes: 1024 * 1024,
+                    maxFiles: 2,
+                    batchWindowMs: 10_000,
+                    delegate,
+                  }),
+                ),
+                Logger.layer([Logger.tracerLogger], { mergeWithExisting: false }),
+                Layer.succeed(References.MinimumLogLevel, "Info"),
+              ),
+            ),
+          );
+
+          assert.equal(delegateSpans.length, 2);
+          assert.equal(capturedParents[1], delegateSpans[0]);
         }),
       ),
     );

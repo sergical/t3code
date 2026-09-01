@@ -26,9 +26,11 @@ import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
+import * as Tracer from "effect/Tracer";
 import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -566,6 +568,49 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
+  });
+
+  it("runs turn-start handling inside the event's trace", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+    let recordedTraceId: string | undefined;
+    harness.sendTurn.mockImplementationOnce((_: unknown) =>
+      Effect.gen(function* () {
+        const parent = yield* Effect.option(Effect.currentParentSpan);
+        recordedTraceId = Option.map(parent, (span) => span.traceId).pipe(Option.getOrUndefined);
+        return { threadId: ThreadId.make("thread-1"), turnId: asTurnId("turn-1") };
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine
+        .dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cmd-turn-start-trace"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("user-message-trace"),
+            role: "user",
+            text: "trace this turn start",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: now,
+        })
+        .pipe(
+          Effect.withParentSpan(
+            Tracer.externalSpan({
+              traceId: "trace-request",
+              spanId: "span-request",
+              sampled: true,
+            }),
+          ),
+        ),
+    );
+
+    await waitFor(() => recordedTraceId !== undefined);
+    expect(recordedTraceId).toBe("trace-request");
   });
 
   effectIt.effect("projects starting before a slow provider session finishes", () =>
