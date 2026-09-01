@@ -22,6 +22,7 @@ import {
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
+  readRouteFields,
   toMcpElicitationResponse,
 } from "./CodexSessionRuntime.ts";
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
@@ -247,6 +248,38 @@ describe("buildTurnStartParams", () => {
         },
       ],
     });
+  });
+});
+
+describe("readRouteFields", () => {
+  it("routes token usage updates to their turn", () => {
+    const route = readRouteFields({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        tokenUsage: {
+          total: {
+            inputTokens: 1,
+            cachedInputTokens: 0,
+            outputTokens: 1,
+            reasoningOutputTokens: 0,
+            totalTokens: 2,
+          },
+          last: {
+            inputTokens: 1,
+            cachedInputTokens: 0,
+            outputTokens: 1,
+            reasoningOutputTokens: 0,
+            totalTokens: 2,
+          },
+          modelContextWindow: null,
+        },
+      },
+    });
+
+    NodeAssert.equal(route.turnId, "turn-1");
+    NodeAssert.equal(route.itemId, undefined);
   });
 });
 
@@ -777,7 +810,10 @@ describe("isRecoverableThreadResumeError", () => {
 describe("openCodexThread", () => {
   it.effect("falls back to thread/start when resume fails recoverably", () =>
     Effect.gen(function* () {
-      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      const calls: Array<{
+        method: "thread/start" | "thread/resume";
+        payload: unknown;
+      }> = [];
       const started = makeThreadOpenResponse("fresh-thread");
       const client = {
         request: <M extends "thread/start" | "thread/resume">(

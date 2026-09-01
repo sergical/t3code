@@ -63,6 +63,8 @@ import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
 } from "../src/orchestration/Services/OrchestrationEngine.ts";
+import { ProviderTurnTracing } from "../src/orchestration/Services/ProviderTurnTracing.ts";
+import { ProviderTurnTracingLive } from "../src/orchestration/Layers/ProviderTurnTracing.ts";
 import { ThreadDeletionReactor } from "../src/orchestration/Services/ThreadDeletionReactor.ts";
 import { OrchestrationReactor } from "../src/orchestration/Services/OrchestrationReactor.ts";
 import { ProjectionSnapshotQuery } from "../src/orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -230,6 +232,12 @@ export interface OrchestrationIntegrationHarness {
 interface MakeOrchestrationIntegrationHarnessOptions {
   readonly provider?: ProviderDriverKind;
   readonly realCodex?: boolean;
+  /** Use the real ProviderTurnTracing reactor so agent turns emit gen_ai spans. */
+  readonly liveTurnTracing?: boolean;
+  /** Extra layer merged into the harness runtime, e.g. a Tracer for span export. */
+  readonly extraLayer?: Layer.Layer<never>;
+  /** Overrides applied to the test ServerConfig, e.g. traceGenAiContent. */
+  readonly configOverrides?: Partial<ServerConfig["Service"]>;
 }
 
 export const makeOrchestrationIntegrationHarness = (
@@ -275,14 +283,23 @@ export const makeOrchestrationIntegrationHarness = (
     const realCodexRegistry = Layer.effect(
       ProviderAdapterRegistry,
       Effect.gen(function* () {
-        const codexSettings = yield* decodeCodexSettings({});
-        const codexAdapter = yield* makeCodexAdapter(codexSettings);
+        // CODEX_BINARY_PATH gates the real-codex tests; honor it here too, since a
+        // bare PATH lookup can hit an interposing shim that never answers.
+        const codexSettings = yield* decodeCodexSettings(
+          process.env.CODEX_BINARY_PATH ? { binaryPath: process.env.CODEX_BINARY_PATH } : {},
+        );
+        const codexAdapter = yield* makeCodexAdapter(
+          codexSettings,
+          process.env.T3CODE_TEST_CODEX_EVENT_LOG
+            ? { nativeEventLogPath: process.env.T3CODE_TEST_CODEX_EVENT_LOG }
+            : undefined,
+        );
         return makeAdapterRegistryMock({
           [ProviderDriverKind.make("codex")]: codexAdapter,
         });
       }),
     ).pipe(
-      Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir)),
+      Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir, options?.configOverrides)),
       Layer.provideMerge(NodeServices.layer),
       Layer.provideMerge(providerSessionDirectoryLayer),
     );
@@ -371,6 +388,16 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(providerCommandReactorLayer),
       Layer.provideMerge(checkpointReactorLayer),
       Layer.provideMerge(
+        options?.liveTurnTracing === true
+          ? ProviderTurnTracingLive.pipe(
+              Layer.provide(runtimeServicesLayer),
+              Layer.provide(VcsProcess.layer),
+            )
+          : Layer.succeed(ProviderTurnTracing, {
+              start: () => Effect.void,
+            }),
+      ),
+      Layer.provideMerge(
         Layer.succeed(ThreadDeletionReactor, {
           start: () => Effect.void,
           drain: Effect.void,
@@ -390,7 +417,8 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provide(persistenceLayer),
       Layer.provideMerge(RepositoryIdentityResolver.layer),
       Layer.provideMerge(ServerSettingsService.layerTest()),
-      Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir)),
+      Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir, options?.configOverrides)),
+      Layer.provideMerge(options?.extraLayer ?? Layer.empty),
       Layer.provideMerge(NodeServices.layer),
     );
 
